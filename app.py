@@ -25,6 +25,7 @@ app = Flask(__name__)
 
 EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
 PORT = int(os.environ.get("PORT", 5050))
+ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
 
 def _detect_google_drive_folder():
@@ -265,6 +266,61 @@ def serve_photo(filename):
     if safe != filename:
         abort(404)
     return send_from_directory(CACHE_DIR, filename)
+
+
+
+def _check_admin():
+    key = request.args.get("key") or request.form.get("key") or ""
+    return bool(ADMIN_KEY) and key == ADMIN_KEY
+
+
+@app.route("/admin")
+def admin_page():
+    if not ADMIN_KEY:
+        return "Falta configurar ADMIN_KEY en Render", 500
+    if not _check_admin():
+        return "Clave incorrecta", 403
+    return render_template("admin.html", event_name=EVENT_NAME, admin_key=ADMIN_KEY)
+
+
+@app.route("/api/admin/borrar-foto", methods=["POST"])
+def admin_borrar_foto():
+    if not _check_admin():
+        return jsonify(ok=False), 403
+    nombre = secure_filename(request.form.get("nombre", ""))
+    if not nombre:
+        return jsonify(ok=False), 400
+    ruta = CACHE_DIR / nombre
+    if ruta.exists():
+        ruta.unlink()
+    uid = nombre.rsplit(".", 1)[0]
+    if _drive_service:
+        try:
+            res = _drive_service.files().list(
+                q="name contains '" + uid + "'", fields="files(id,name)").execute()
+            for f in res.get("files", []):
+                _drive_service.files().delete(fileId=f["id"]).execute()
+        except Exception:
+            import traceback
+            traceback.print_exc()
+    else:
+        for p in PHOTOS_DIR.glob(uid + ".*"):
+            p.unlink()
+    return jsonify(ok=True)
+
+
+@app.route("/api/admin/borrar-mensaje", methods=["POST"])
+def admin_borrar_mensaje():
+    if not _check_admin():
+        return jsonify(ok=False), 403
+    ts = request.form.get("ts", "")
+    with _messages_lock:
+        quedan = [m for m in load_messages() if str(m.get("ts")) != ts]
+        tmp = MESSAGES_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(quedan, f, ensure_ascii=False)
+        tmp.replace(MESSAGES_FILE)
+    return jsonify(ok=True)
 
 
 if __name__ == "__main__":
