@@ -68,6 +68,55 @@ if GDRIVE_SA_JSON_B64:
         print("[drive] no se pudo inicializar la API de Drive, se usara la carpeta local.")
 
 
+def _drive_find_id(name: str):
+    """Devuelve el id del archivo con ese nombre en la carpeta, o None."""
+    if not _drive_service:
+        return None
+    try:
+        q = "name = '" + name.replace("'", "") + "' and trashed = false"
+        if GDRIVE_FOLDER_ID:
+            q += " and '" + GDRIVE_FOLDER_ID + "' in parents"
+        res = _drive_service.files().list(q=q, fields="files(id)", pageSize=1).execute()
+        archivos = res.get("files", [])
+        return archivos[0]["id"] if archivos else None
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return None
+
+
+def drive_upsert(name: str, data: bytes) -> None:
+    """Crea o reemplaza un archivo en Drive (para mensajes.json y previews)."""
+    if not _drive_service:
+        return
+    try:
+        from googleapiclient.http import MediaIoBaseUpload
+        mimetype = mimetypes.guess_type(name)[0] or "application/octet-stream"
+        media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
+        existente = _drive_find_id(name)
+        if existente:
+            _drive_service.files().update(fileId=existente, media_body=media).execute()
+        else:
+            metadata = {"name": name}
+            if GDRIVE_FOLDER_ID:
+                metadata["parents"] = [GDRIVE_FOLDER_ID]
+            _drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+def drive_download(file_id: str) -> Optional[bytes]:
+    if not _drive_service:
+        return None
+    try:
+        return _drive_service.files().get_media(fileId=file_id).execute()
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return None
+
+
 def save_original(name: str, data: bytes) -> None:
     if _drive_service:
         try:
@@ -100,6 +149,10 @@ GOLD_BORDER_RGB = (232, 196, 104)
 BORDER_RATIO = 0.012
 MIN_BORDER_PX = 10
 
+# Cuánto tiempo siguen apareciendo en pantalla las fotos y saludos (horas).
+RETENTION_HOURS = float(os.environ.get("RETENTION_HOURS", 12))
+RETENTION_SECONDS = RETENTION_HOURS * 3600
+
 # ---- Saludos -------------------------------------------------------------
 MESSAGES_FILE = CACHE_DIR / "mensajes.json"
 MAX_NAME_LEN = 40
@@ -115,6 +168,19 @@ def load_messages():
         return []
 
 
+def _write_messages(mensajes) -> None:
+    """Guarda la lista local y la sincroniza a Drive, para sobrevivir reinicios."""
+    tmp = MESSAGES_FILE.with_suffix(".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump(mensajes, f, ensure_ascii=False)
+    tmp.replace(MESSAGES_FILE)
+    try:
+        drive_upsert("mensajes.json", json.dumps(mensajes, ensure_ascii=False).encode("utf-8"))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
 def save_message(nombre: str, texto: str) -> Optional[dict]:
     texto = (texto or "").strip()[:MAX_MESSAGE_LEN]
     nombre = (nombre or "").strip()[:MAX_NAME_LEN]
@@ -125,19 +191,7 @@ def save_message(nombre: str, texto: str) -> Optional[dict]:
     with _messages_lock:
         mensajes = load_messages()
         mensajes.append(entry)
-        tmp = MESSAGES_FILE.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(mensajes, f, ensure_ascii=False)
-        tmp.replace(MESSAGES_FILE)
-
-    # Respaldo del saludo en Drive, para que quede junto a las fotos.
-    try:
-        contenido = f"{nombre or 'Anonimo'}\n\n{texto}\n"
-        stamp = time.strftime("%Y%m%d-%H%M%S")
-        save_original(f"saludo-{stamp}-{uuid.uuid4().hex[:6]}.txt", contenido.encode("utf-8"))
-    except Exception:
-        import traceback
-        traceback.print_exc()
+        _write_messages(mensajes)
 
     return entry
 # ---------------------------------------------------------------------------
@@ -190,7 +244,13 @@ def save_upload(file_storage) -> Optional[str]:
         img = add_gold_border(img)
 
         cache_name = f"{uid}.jpg"
-        img.save(CACHE_DIR / cache_name, "JPEG", quality=92)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=92)
+        preview_data = buf.getvalue()
+        with open(CACHE_DIR / cache_name, "wb") as f:
+            f.write(preview_data)
+        # Copia chica en Drive para poder rearmar el loop si el server reinicia.
+        drive_upsert(f"preview-{uid}.jpg", preview_data)
         return cache_name
     except Exception as e:
         print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} - {e}")
@@ -250,14 +310,19 @@ def api_upload():
 
 @app.route("/api/photos")
 def api_photos():
-    files = [p for p in CACHE_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".jpg"]
+    corte = time.time() - RETENTION_SECONDS
+    files = [
+        p for p in CACHE_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() == ".jpg" and p.stat().st_mtime >= corte
+    ]
     files.sort(key=lambda p: p.stat().st_mtime)
     return jsonify(photos=[f"/photos/{p.name}" for p in files])
 
 
 @app.route("/api/mensajes")
 def api_mensajes():
-    return jsonify(mensajes=load_messages())
+    corte = time.time() - RETENTION_SECONDS
+    return jsonify(mensajes=[m for m in load_messages() if m.get("ts", 0) >= corte])
 
 
 @app.route("/photos/<path:filename>")
@@ -266,7 +331,6 @@ def serve_photo(filename):
     if safe != filename:
         abort(404)
     return send_from_directory(CACHE_DIR, filename)
-
 
 
 def _check_admin():
@@ -316,11 +380,68 @@ def admin_borrar_mensaje():
     ts = request.form.get("ts", "")
     with _messages_lock:
         quedan = [m for m in load_messages() if str(m.get("ts")) != ts]
-        tmp = MESSAGES_FILE.with_suffix(".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(quedan, f, ensure_ascii=False)
-        tmp.replace(MESSAGES_FILE)
+        _write_messages(quedan)
     return jsonify(ok=True)
+
+
+def _restore_from_drive():
+    """Al arrancar, rearma el cache desde Drive: los saludos y las previews
+    de las últimas RETENTION_HOURS. Así un reinicio de Render no vacía la
+    pantalla en medio del evento."""
+    if not _drive_service:
+        return
+    try:
+        # 1) Saludos
+        mid = _drive_find_id("mensajes.json")
+        if mid and not MESSAGES_FILE.exists():
+            datos = drive_download(mid)
+            if datos:
+                with open(MESSAGES_FILE, "wb") as f:
+                    f.write(datos)
+                print("[restore] saludos recuperados de Drive.")
+
+        # 2) Previews de fotos
+        corte = time.time() - RETENTION_SECONDS
+        q = "name contains 'preview-' and trashed = false"
+        if GDRIVE_FOLDER_ID:
+            q += " and '" + GDRIVE_FOLDER_ID + "' in parents"
+        token, recuperadas = None, 0
+        while True:
+            res = _drive_service.files().list(
+                q=q, fields="nextPageToken, files(id,name,createdTime)",
+                pageSize=200, pageToken=token,
+            ).execute()
+            for archivo in res.get("files", []):
+                nombre = archivo["name"]
+                if not nombre.startswith("preview-"):
+                    continue
+                creado = archivo.get("createdTime", "")
+                try:
+                    ts = time.mktime(time.strptime(creado[:19], "%Y-%m-%dT%H:%M:%S"))
+                except Exception:
+                    ts = time.time()
+                if ts < corte:
+                    continue
+                destino = CACHE_DIR / nombre.replace("preview-", "", 1)
+                if destino.exists():
+                    continue
+                datos = drive_download(archivo["id"])
+                if datos:
+                    with open(destino, "wb") as f:
+                        f.write(datos)
+                    os.utime(destino, (ts, ts))
+                    recuperadas += 1
+            token = res.get("nextPageToken")
+            if not token:
+                break
+        if recuperadas:
+            print(f"[restore] {recuperadas} fotos recuperadas de Drive.")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+
+threading.Thread(target=_restore_from_drive, daemon=True).start()
 
 
 if __name__ == "__main__":
