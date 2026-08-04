@@ -1,4 +1,88 @@
-<!DOCTYPE html PUBLIC "-//W3C//DTD HTML 4.01//EN" ...>
-<html>
-<h...
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Moderar</title>
+<style>
+body{margin:0;padding:20px;background:#150F1F;color:#F5F0FA;font-family:system-ui,sans-serif;}
+h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
+.grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;}
+.item{position:relative;}
+.item img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;}
+.x{position:absolute;top:5px;right:5px;width:28px;height:28px;border:none;border-radius:50%;background:rgba(220,30,60,.92);color:#fff;font-size:16px;cursor:pointer;line-height:1;}
+.msg{background:rgba(255,255,255,.05);border-radius:12px;padding:14px;margin-bottom:10px;display:flex;justify-content:space-between;gap:12px;}
+.autor{color:#E8C468;font-size:13px;margin-top:6px;}
+.msg button{border:none;border-radius:8px;background:rgba(220,30,60,.92);color:#fff;padding:8px 12px;cursor:pointer;flex-shrink:0;}
+.vacio{color:#9384AC;font-size:14px;}
+</style>
+</head>
+<body>
+<h2>Fotos en pantalla</h2>
+<div class="grid" id="fotos"></div>
+<h2>Saludos en pantalla</h2>
+<div id="mensajes"></div>
+<script>
+const KEY = {{ admin_key|tojson }};
 
+async function cargar() {
+  const [pf, pm] = await Promise.all([
+    fetch('/api/photos', {cache:'no-store'}).then(r => r.json()),
+    fetch('/api/mensajes', {cache:'no-store'}).then(r => r.json())
+  ]);
+
+  const cf = document.getElementById('fotos');
+  cf.innerHTML = '';
+  if (!pf.photos.length) cf.innerHTML = '<p class="vacio">Sin fotos.</p>';
+  pf.photos.forEach(src => {
+    const nombre = src.split('/').pop();
+    const d = document.createElement('div');
+    d.className = 'item';
+    const img = document.createElement('img');
+    img.src = src;
+    const b = document.createElement('button');
+    b.className = 'x';
+    b.textContent = 'X';
+    b.onclick = () => borrar('/api/admin/borrar-foto', {nombre});
+    d.append(img, b);
+    cf.appendChild(d);
+  });
+
+  const cm = document.getElementById('mensajes');
+  cm.innerHTML = '';
+  if (!pm.mensajes.length) cm.innerHTML = '<p class="vacio">Sin saludos.</p>';
+  pm.mensajes.forEach(m => {
+    const d = document.createElement('div');
+    d.className = 'msg';
+    const izq = document.createElement('div');
+    const t = document.createElement('div');
+    t.textContent = m.texto;
+    izq.appendChild(t);
+    if (m.nombre) {
+      const a = document.createElement('div');
+      a.className = 'autor';
+      a.textContent = '- ' + m.nombre;
+      izq.appendChild(a);
+    }
+    const b = document.createElement('button');
+    b.textContent = 'Borrar';
+    b.onclick = () => borrar('/api/admin/borrar-mensaje', {ts: m.ts});
+    d.append(izq, b);
+    cm.appendChild(d);
+  });
+}
+
+async function borrar(url, datos) {
+  if (!confirm('Borrar definitivamente?')) return;
+  const fd = new FormData();
+  fd.append('key', KEY);
+  for (const k in datos) fd.append(k, datos[k]);
+  await fetch(url, {method:'POST', body: fd});
+  cargar();
+}
+
+cargar();
+setInterval(cargar, 10000);
+</script>
+</body>
+</html>
