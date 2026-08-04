@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.nico.eventphotos</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/bin/python3</string>
+        <string>/Users/TU_USUARIO/eventphotos/app.py</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>EVENT_NAME</key>
+        <string>Nombre del evento</string>
+        <key>EVENTPHOTOS_DIR</key>
+        <string>/Users/TU_USUARIO/Google Drive/Mi unidad/EventPhotos</string>
+        <key>PORT</key>
+        <string>5050</string>
+    </dict>
+
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/eventphotos.log</string>
+    <key>StandardErrorPath</key>
+    <string>/tmp/eventphotos.err</string>
+</dict>
+</plist>
