@@ -1,11 +1,11 @@
 import os
 import io
 import uuid
-import json
-import base64
-import mimetypes
 import subprocess
 import tempfile
+import base64
+import json
+import mimetypes
 from pathlib import Path
 from typing import Optional
 
@@ -17,15 +17,20 @@ try:
     import pillow_heif
     pillow_heif.register_heif_opener()
 except ImportError:
-    pillow_heif = None
+    pillow_heif = None  # Si no está instalado, simplemente no se podrá procesar HEIC
 
 app = Flask(__name__)
 
+# ---- Configuración por evento -------------------------------------------
+# Editá estas 3 líneas para cada fiesta (o pasalas como variables de entorno,
+# ver el LaunchAgent .plist incluido).
 EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
 PORT = int(os.environ.get("PORT", 5050))
 
 
 def _detect_google_drive_folder():
+    """Encuentra la carpeta real de Google Drive Desktop (CloudStorage),
+    sin depender del email de la cuenta ni del idioma del sistema."""
     base = Path.home() / "Library" / "CloudStorage"
     if not base.exists():
         return None
@@ -42,69 +47,11 @@ _gdrive = _detect_google_drive_folder()
 _default_photos_dir = (_gdrive / "EventPhotos") if _gdrive else (Path.home() / "EventPhotos")
 
 PHOTOS_DIR = Path(os.environ.get("EVENTPHOTOS_DIR", str(_default_photos_dir)))
+# --------------------------------------------------------------------------
+
 PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
-GDRIVE_SA_JSON_B64 = os.environ.get("GDRIVE_SERVICE_ACCOUNT_B64")
-
-_drive_service = None
-if GDRIVE_SA_JSON_B64:
-    try:
-        from google.oauth2 import service_account
-        from googleapiclient.discovery import build
-
-        _creds_info = json.loads(base64.b64decode(GDRIVE_SA_JSON_B64))
-        _credentials = service_account.Credentials.from_service_account_info(
-            _creds_info, scopes=["https://www.googleap
-
-cd ~/Downloads/"eventphotos 3"
-cat > app.py << 'PYEOF'
-import os
-import io
-import uuid
-import json
-import base64
-import mimetypes
-import subprocess
-import tempfile
-from pathlib import Path
-from typing import Optional
-
-from flask import Flask, request, jsonify, render_template, send_from_directory, abort
-from werkzeug.utils import secure_filename
-from PIL import Image, ImageOps
-
-try:
-    import pillow_heif
-    pillow_heif.register_heif_opener()
-except ImportError:
-    pillow_heif = None
-
-app = Flask(__name__)
-
-EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
-PORT = int(os.environ.get("PORT", 5050))
-
-
-def _detect_google_drive_folder():
-    base = Path.home() / "Library" / "CloudStorage"
-    if not base.exists():
-        return None
-    for entry in base.iterdir():
-        if entry.is_dir() and entry.name.startswith("GoogleDrive-"):
-            for sub in ("My Drive", "Mi unidad"):
-                candidate = entry / sub
-                if candidate.exists():
-                    return candidate
-    return None
-
-
-_gdrive = _detect_google_drive_folder()
-_default_photos_dir = (_gdrive / "EventPhotos") if _gdrive else (Path.home() / "EventPhotos")
-
-PHOTOS_DIR = Path(os.environ.get("EVENTPHOTOS_DIR", str(_default_photos_dir)))
-PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
-
+# ---- Google Drive vía API (para cuando corre en la nube, sin Drive Desktop) ----
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 GDRIVE_SA_JSON_B64 = os.environ.get("GDRIVE_SERVICE_ACCOUNT_B64")
 
@@ -119,14 +66,17 @@ if GDRIVE_SA_JSON_B64:
             _creds_info, scopes=["https://www.googleapis.com/auth/drive"]
         )
         _drive_service = build("drive", "v3", credentials=_credentials)
-        print("[drive] conectado via Service Account (modo nube).")
+        print("[drive] conectado vía Service Account (modo nube).")
     except Exception:
         import traceback
         traceback.print_exc()
-        print("[drive] no se pudo inicializar la API de Drive, se usara la carpeta local.")
+        print("[drive] no se pudo inicializar la API de Drive, se usará la carpeta local.")
 
 
 def save_original(name: str, data: bytes) -> None:
+    """Guarda el archivo original: por la API de Drive si hay credenciales
+    configuradas (modo nube), o en la carpeta local sincronizada con Drive
+    Desktop (modo Mac). Nunca revienta el upload si Drive falla."""
     if _drive_service:
         try:
             from googleapiclient.http import MediaIoBaseUpload
@@ -140,22 +90,23 @@ def save_original(name: str, data: bytes) -> None:
         except Exception:
             import traceback
             traceback.print_exc()
-            print(f"[drive] fallo la subida por API de {name!r}, se guarda localmente.")
+            print(f"[drive] falló la subida por API de {name!r}, se guarda localmente como respaldo.")
 
     with open(PHOTOS_DIR / name, "wb") as f:
         f.write(data)
+# ---------------------------------------------------------------------------------
 
-
+# Copia liviana usada solo por el loop de OBS/vMix — no se sincroniza a Drive.
 CACHE_DIR = Path(os.environ.get("EVENTPHOTOS_CACHE", "/tmp/eventphotos_cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXT = {
     "jpg", "jpeg", "png", "heic", "heif", "webp",
-    "dng", "cr2", "cr3", "nef", "arw", "orf", "raf", "rw2",
+    "dng", "cr2", "cr3", "nef", "arw", "orf", "raf", "rw2",  # RAW: se respaldan pero sin preview
 }
 PREVIEWABLE_EXT = {"jpg", "jpeg", "png", "heic", "heif", "webp"}
-GOLD_BORDER_RGB = (232, 196, 104)
-BORDER_RATIO = 0.012
+GOLD_BORDER_RGB = (232, 196, 104)  # mismo dorado de la página de subida
+BORDER_RATIO = 0.012  # ~1.2% del lado más largo de la foto
 MIN_BORDER_PX = 10
 
 
@@ -169,6 +120,8 @@ def add_gold_border(img):
 
 
 def convert_raw_to_jpeg_bytes(original_bytes: bytes, ext: str) -> bytes:
+    """Convierte RAW/DNG a JPEG con `sips` (nativo de macOS), para poder
+    generar una preview aunque Pillow no sepa leer el formato original."""
     with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as src:
         src.write(original_bytes)
         src_path = src.name
@@ -187,6 +140,9 @@ def convert_raw_to_jpeg_bytes(original_bytes: bytes, ext: str) -> bytes:
 
 
 def save_upload(file_storage) -> Optional[str]:
+    """Guarda el archivo original SIN tocar (calidad completa, se sincroniza
+    a Drive) y genera una copia para el loop con borde dorado. Los RAW se
+    convierten con sips para poder mostrarlos igual (a menor calidad)."""
     if not file_storage or not file_storage.filename:
         return None
     if not allowed_file(file_storage.filename):
@@ -196,8 +152,10 @@ def save_upload(file_storage) -> Optional[str]:
     uid = uuid.uuid4().hex
     original_bytes = file_storage.stream.read()
 
+    # 1) Original intacto -> Drive (API en la nube, o carpeta local con Mac)
     save_original(f"{uid}.{ext}", original_bytes)
 
+    # 2) Preview para el loop (RAW se convierte primero con sips)
     try:
         preview_bytes = original_bytes if ext in PREVIEWABLE_EXT else convert_raw_to_jpeg_bytes(original_bytes, ext)
         img = Image.open(io.BytesIO(preview_bytes))
@@ -209,7 +167,7 @@ def save_upload(file_storage) -> Optional[str]:
         img.save(CACHE_DIR / cache_name, "JPEG", quality=92)
         return cache_name
     except Exception as e:
-        print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} - {e}")
+        print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} — {e}")
         return "sin-preview"
 
 
@@ -237,7 +195,7 @@ def api_upload():
             if name:
                 saved.append(name)
             else:
-                print(f"[upload] descartado (extension no reconocida): {f.filename!r}")
+                print(f"[upload] descartado (extensión no reconocida): {f.filename!r}")
         except Exception:
             import traceback
             traceback.print_exc()
