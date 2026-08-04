@@ -2,3 +2,6 @@ Flask
 Pillow
 pillow-heif
 qrcode[pil]
+gunicorn
+google-api-python-client
+google-auth
