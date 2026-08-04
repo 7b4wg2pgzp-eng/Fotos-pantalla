@@ -1,11 +1,13 @@
 import os
 import io
+import time
 import uuid
+import json
+import base64
+import threading
+import mimetypes
 import subprocess
 import tempfile
-import base64
-import json
-import mimetypes
 from pathlib import Path
 from typing import Optional
 
@@ -17,20 +19,15 @@ try:
     import pillow_heif
     pillow_heif.register_heif_opener()
 except ImportError:
-    pillow_heif = None  # Si no está instalado, simplemente no se podrá procesar HEIC
+    pillow_heif = None
 
 app = Flask(__name__)
 
-# ---- Configuración por evento -------------------------------------------
-# Editá estas 3 líneas para cada fiesta (o pasalas como variables de entorno,
-# ver el LaunchAgent .plist incluido).
 EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
 PORT = int(os.environ.get("PORT", 5050))
 
 
 def _detect_google_drive_folder():
-    """Encuentra la carpeta real de Google Drive Desktop (CloudStorage),
-    sin depender del email de la cuenta ni del idioma del sistema."""
     base = Path.home() / "Library" / "CloudStorage"
     if not base.exists():
         return None
@@ -47,11 +44,8 @@ _gdrive = _detect_google_drive_folder()
 _default_photos_dir = (_gdrive / "EventPhotos") if _gdrive else (Path.home() / "EventPhotos")
 
 PHOTOS_DIR = Path(os.environ.get("EVENTPHOTOS_DIR", str(_default_photos_dir)))
-# --------------------------------------------------------------------------
-
 PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
-# ---- Google Drive vía API (para cuando corre en la nube, sin Drive Desktop) ----
 GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
 GDRIVE_SA_JSON_B64 = os.environ.get("GDRIVE_SERVICE_ACCOUNT_B64")
 
@@ -66,17 +60,14 @@ if GDRIVE_SA_JSON_B64:
             _creds_info, scopes=["https://www.googleapis.com/auth/drive"]
         )
         _drive_service = build("drive", "v3", credentials=_credentials)
-        print("[drive] conectado vía Service Account (modo nube).")
+        print("[drive] conectado via Service Account (modo nube).")
     except Exception:
         import traceback
         traceback.print_exc()
-        print("[drive] no se pudo inicializar la API de Drive, se usará la carpeta local.")
+        print("[drive] no se pudo inicializar la API de Drive, se usara la carpeta local.")
 
 
 def save_original(name: str, data: bytes) -> None:
-    """Guarda el archivo original: por la API de Drive si hay credenciales
-    configuradas (modo nube), o en la carpeta local sincronizada con Drive
-    Desktop (modo Mac). Nunca revienta el upload si Drive falla."""
     if _drive_service:
         try:
             from googleapiclient.http import MediaIoBaseUpload
@@ -90,24 +81,65 @@ def save_original(name: str, data: bytes) -> None:
         except Exception:
             import traceback
             traceback.print_exc()
-            print(f"[drive] falló la subida por API de {name!r}, se guarda localmente como respaldo.")
+            print(f"[drive] fallo la subida por API de {name!r}, se guarda localmente.")
 
     with open(PHOTOS_DIR / name, "wb") as f:
         f.write(data)
-# ---------------------------------------------------------------------------------
 
-# Copia liviana usada solo por el loop de OBS/vMix — no se sincroniza a Drive.
+
 CACHE_DIR = Path(os.environ.get("EVENTPHOTOS_CACHE", "/tmp/eventphotos_cache"))
 CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_EXT = {
     "jpg", "jpeg", "png", "heic", "heif", "webp",
-    "dng", "cr2", "cr3", "nef", "arw", "orf", "raf", "rw2",  # RAW: se respaldan pero sin preview
+    "dng", "cr2", "cr3", "nef", "arw", "orf", "raf", "rw2",
 }
 PREVIEWABLE_EXT = {"jpg", "jpeg", "png", "heic", "heif", "webp"}
-GOLD_BORDER_RGB = (232, 196, 104)  # mismo dorado de la página de subida
-BORDER_RATIO = 0.012  # ~1.2% del lado más largo de la foto
+GOLD_BORDER_RGB = (232, 196, 104)
+BORDER_RATIO = 0.012
 MIN_BORDER_PX = 10
+
+# ---- Saludos -------------------------------------------------------------
+MESSAGES_FILE = CACHE_DIR / "mensajes.json"
+MAX_NAME_LEN = 40
+MAX_MESSAGE_LEN = 280
+_messages_lock = threading.Lock()
+
+
+def load_messages():
+    try:
+        with open(MESSAGES_FILE, encoding="utf-8") as f:
+            return json.load(f)
+    except Exception:
+        return []
+
+
+def save_message(nombre: str, texto: str) -> Optional[dict]:
+    texto = (texto or "").strip()[:MAX_MESSAGE_LEN]
+    nombre = (nombre or "").strip()[:MAX_NAME_LEN]
+    if not texto:
+        return None
+
+    entry = {"nombre": nombre, "texto": texto, "ts": time.time()}
+    with _messages_lock:
+        mensajes = load_messages()
+        mensajes.append(entry)
+        tmp = MESSAGES_FILE.with_suffix(".tmp")
+        with open(tmp, "w", encoding="utf-8") as f:
+            json.dump(mensajes, f, ensure_ascii=False)
+        tmp.replace(MESSAGES_FILE)
+
+    # Respaldo del saludo en Drive, para que quede junto a las fotos.
+    try:
+        contenido = f"{nombre or 'Anonimo'}\n\n{texto}\n"
+        stamp = time.strftime("%Y%m%d-%H%M%S")
+        save_original(f"saludo-{stamp}-{uuid.uuid4().hex[:6]}.txt", contenido.encode("utf-8"))
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    return entry
+# ---------------------------------------------------------------------------
 
 
 def allowed_file(filename: str) -> bool:
@@ -120,8 +152,6 @@ def add_gold_border(img):
 
 
 def convert_raw_to_jpeg_bytes(original_bytes: bytes, ext: str) -> bytes:
-    """Convierte RAW/DNG a JPEG con `sips` (nativo de macOS), para poder
-    generar una preview aunque Pillow no sepa leer el formato original."""
     with tempfile.NamedTemporaryFile(suffix=f".{ext}", delete=False) as src:
         src.write(original_bytes)
         src_path = src.name
@@ -140,9 +170,6 @@ def convert_raw_to_jpeg_bytes(original_bytes: bytes, ext: str) -> bytes:
 
 
 def save_upload(file_storage) -> Optional[str]:
-    """Guarda el archivo original SIN tocar (calidad completa, se sincroniza
-    a Drive) y genera una copia para el loop con borde dorado. Los RAW se
-    convierten con sips para poder mostrarlos igual (a menor calidad)."""
     if not file_storage or not file_storage.filename:
         return None
     if not allowed_file(file_storage.filename):
@@ -152,10 +179,8 @@ def save_upload(file_storage) -> Optional[str]:
     uid = uuid.uuid4().hex
     original_bytes = file_storage.stream.read()
 
-    # 1) Original intacto -> Drive (API en la nube, o carpeta local con Mac)
     save_original(f"{uid}.{ext}", original_bytes)
 
-    # 2) Preview para el loop (RAW se convierte primero con sips)
     try:
         preview_bytes = original_bytes if ext in PREVIEWABLE_EXT else convert_raw_to_jpeg_bytes(original_bytes, ext)
         img = Image.open(io.BytesIO(preview_bytes))
@@ -167,7 +192,7 @@ def save_upload(file_storage) -> Optional[str]:
         img.save(CACHE_DIR / cache_name, "JPEG", quality=92)
         return cache_name
     except Exception as e:
-        print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} — {e}")
+        print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} - {e}")
         return "sin-preview"
 
 
@@ -181,12 +206,20 @@ def loop_page():
     return render_template("loop.html", event_name=EVENT_NAME)
 
 
+@app.route("/saludos")
+def saludos_page():
+    return render_template("saludos.html", event_name=EVENT_NAME)
+
+
 @app.route("/api/upload", methods=["POST"])
 def api_upload():
-    files = request.files.getlist("photos")
-    print(f"[upload] recibidos: {[f.filename for f in files]}")
-    if not files:
-        return jsonify(ok=False, error="Sin archivos"), 400
+    files = [f for f in request.files.getlist("photos") if f and f.filename]
+    nombre = request.form.get("nombre", "")
+    mensaje = request.form.get("mensaje", "")
+    print(f"[upload] fotos={[f.filename for f in files]} nombre={nombre!r} mensaje={bool(mensaje.strip())}")
+
+    if not files and not mensaje.strip():
+        return jsonify(ok=False, error="Manda al menos una foto o un saludo"), 400
 
     saved = []
     for f in files:
@@ -195,22 +228,35 @@ def api_upload():
             if name:
                 saved.append(name)
             else:
-                print(f"[upload] descartado (extensión no reconocida): {f.filename!r}")
+                print(f"[upload] descartado (extension no reconocida): {f.filename!r}")
         except Exception:
             import traceback
             traceback.print_exc()
             continue
 
-    if not saved:
-        return jsonify(ok=False, error="No se pudo procesar ninguna imagen"), 400
-    return jsonify(ok=True, saved=saved)
+    mensaje_guardado = False
+    try:
+        if save_message(nombre, mensaje):
+            mensaje_guardado = True
+    except Exception:
+        import traceback
+        traceback.print_exc()
+
+    if not saved and not mensaje_guardado:
+        return jsonify(ok=False, error="No se pudo procesar el envio"), 400
+    return jsonify(ok=True, saved=saved, mensaje=mensaje_guardado)
 
 
 @app.route("/api/photos")
 def api_photos():
-    files = [p for p in CACHE_DIR.iterdir() if p.is_file()]
+    files = [p for p in CACHE_DIR.iterdir() if p.is_file() and p.suffix.lower() == ".jpg"]
     files.sort(key=lambda p: p.stat().st_mtime)
     return jsonify(photos=[f"/photos/{p.name}" for p in files])
+
+
+@app.route("/api/mensajes")
+def api_mensajes():
+    return jsonify(mensajes=load_messages())
 
 
 @app.route("/photos/<path:filename>")
@@ -224,5 +270,6 @@ def serve_photo(filename):
 if __name__ == "__main__":
     print(f"Carpeta de fotos:   {PHOTOS_DIR}")
     print(f"Subida (invitados): http://0.0.0.0:{PORT}/")
-    print(f"Loop (OBS/vMix):    http://0.0.0.0:{PORT}/loop")
+    print(f"Loop fotos (OBS):   http://0.0.0.0:{PORT}/loop")
+    print(f"Saludos (VJ):       http://0.0.0.0:{PORT}/saludos")
     app.run(host="0.0.0.0", port=PORT, debug=False)

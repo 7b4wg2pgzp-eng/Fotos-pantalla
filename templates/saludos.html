@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<title>{{ event_name }} — Saludos</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Unbounded:wght@600&family=Manrope:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --gold:#E8C468;
+    --magenta:#FF3E8E;
+    --text:#F5F0FA;
+  }
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+    background:transparent;
+    overflow:hidden;
+  }
+  .stage{
+    position:relative; width:100vw; height:100vh;
+    display:flex; align-items:center; justify-content:center;
+    padding:6vh 8vw;
+    box-sizing:border-box;
+  }
+  .card{
+    position:absolute;
+    max-width:1100px;
+    text-align:center;
+    opacity:0;
+    transition:opacity 1.2s ease;
+  }
+  .card.active{ opacity:1; }
+  .quote{
+    font-family:'Manrope', sans-serif;
+    font-weight:400;
+    font-size:clamp(28px, 4.6vw, 64px);
+    line-height:1.32;
+    color:var(--text);
+    margin:0 0 4vh;
+    text-shadow:0 4px 24px rgba(0,0,0,0.75);
+  }
+  .quote::before{ content:"\201C"; }
+  .quote::after{ content:"\201D"; }
+  .autor{
+    font-family:'Unbounded', sans-serif;
+    font-weight:600;
+    font-size:clamp(18px, 2.2vw, 32px);
+    letter-spacing:.02em;
+    background:linear-gradient(120deg, var(--gold), var(--magenta));
+    -webkit-background-clip:text;
+    background-clip:text;
+    color:transparent;
+  }
+  .rule{
+    width:120px; height:2px; margin:0 auto 3vh;
+    background:linear-gradient(90deg, transparent, var(--gold), transparent);
+  }
+  .empty{
+    font-family:'Manrope', sans-serif;
+    color:rgba(245,240,250,0.35);
+    font-size:22px;
+    letter-spacing:.05em;
+  }
+  @media (prefers-reduced-motion: reduce){
+    .card{ transition:none; }
+  }
+</style>
+</head>
+<body>
+  <div class="stage" id="stage">
+    <div class="empty" id="empty">Esperando saludos…</div>
+  </div>
+
+<script>
+  const stage = document.getElementById('stage');
+  const emptyMsg = document.getElementById('empty');
+  const HOLD_MS = 18000;
+  const FETCH_EVERY_MS = 8000;
+
+  let mensajes = [];
+  let index = 0;
+  let cardEls = [];
+
+  async function refreshMensajes() {
+    try {
+      const res = await fetch('/api/mensajes', { cache: 'no-store' });
+      const data = await res.json();
+      if (JSON.stringify(data.mensajes) !== JSON.stringify(mensajes)) {
+        mensajes = data.mensajes;
+        rebuildCards();
+      }
+    } catch (e) { /* silencioso */ }
+  }
+
+  function rebuildCards() {
+    cardEls.forEach(el => el.remove());
+    cardEls = mensajes.map(m => {
+      const card = document.createElement('div');
+      card.className = 'card';
+
+      const quote = document.createElement('p');
+      quote.className = 'quote';
+      quote.textContent = m.texto;
+      card.appendChild(quote);
+
+      if (m.nombre) {
+        const rule = document.createElement('div');
+        rule.className = 'rule';
+        card.appendChild(rule);
+
+        const autor = document.createElement('div');
+        autor.className = 'autor';
+        autor.textContent = m.nombre;
+        card.appendChild(autor);
+      }
+
+      stage.appendChild(card);
+      return card;
+    });
+    emptyMsg.style.display = mensajes.length ? 'none' : 'block';
+    index = Math.min(index, Math.max(mensajes.length - 1, 0));
+  }
+
+  function showNext() {
+    if (!cardEls.length) return;
+    cardEls.forEach(el => el.classList.remove('active'));
+    const el = cardEls[index];
+    void el.offsetWidth;
+    el.classList.add('active');
+    index = (index + 1) % cardEls.length;
+  }
+
+  refreshMensajes();
+  setInterval(refreshMensajes, FETCH_EVERY_MS);
+  setInterval(showNext, HOLD_MS);
+</script>
+</body>
+</html>
