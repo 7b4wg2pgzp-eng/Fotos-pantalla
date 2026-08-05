@@ -9,12 +9,19 @@ body{margin:0;padding:20px;background:#150F1F;color:#F5F0FA;font-family:system-u
 h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 .grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(110px,1fr));gap:10px;}
 .item{position:relative;}
-.item img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;}
+.item img{width:100%;aspect-ratio:1;object-fit:cover;border-radius:10px;cursor:zoom-in;}
 .x{position:absolute;top:5px;right:5px;width:28px;height:28px;border:none;border-radius:50%;background:rgba(220,30,60,.92);color:#fff;font-size:16px;cursor:pointer;line-height:1;}
 .msg{background:rgba(255,255,255,.05);border-radius:12px;padding:14px;margin-bottom:10px;display:flex;justify-content:space-between;gap:12px;}
 .autor{color:#E8C468;font-size:13px;margin-top:6px;}
 .msg button{border:none;border-radius:8px;background:rgba(220,30,60,.92);color:#fff;padding:8px 12px;cursor:pointer;flex-shrink:0;}
 .vacio{color:#9384AC;font-size:14px;}
+#lightbox{position:fixed;inset:0;background:rgba(8,5,12,.94);display:none;align-items:center;justify-content:center;flex-direction:column;gap:18px;z-index:50;padding:20px;box-sizing:border-box;cursor:zoom-out;}
+#lightbox.abierto{display:flex;}
+#lightbox img{max-width:100%;max-height:78vh;object-fit:contain;border-radius:12px;}
+#lightbox .acciones{display:flex;gap:12px;}
+#lightbox button{border:none;border-radius:10px;padding:12px 20px;font-size:15px;cursor:pointer;}
+#btnBorrar{background:rgba(220,30,60,.95);color:#fff;}
+#btnCerrar{background:rgba(255,255,255,.12);color:#F5F0FA;}
 </style>
 </head>
 <body>
@@ -22,8 +29,44 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 <div class="grid" id="fotos"></div>
 <h2>Saludos en pantalla</h2>
 <div id="mensajes"></div>
+
+<div id="lightbox">
+  <img id="lightboxImg" alt="">
+  <div class="acciones">
+    <button id="btnBorrar">Borrar esta foto</button>
+    <button id="btnCerrar">Cerrar</button>
+  </div>
+</div>
+
 <script>
 const KEY = {{ admin_key|tojson }};
+const lightbox = document.getElementById('lightbox');
+const lightboxImg = document.getElementById('lightboxImg');
+const btnBorrar = document.getElementById('btnBorrar');
+const btnCerrar = document.getElementById('btnCerrar');
+let fotoAbierta = null;
+
+function abrir(src, nombre) {
+  fotoAbierta = nombre;
+  lightboxImg.src = src;
+  lightbox.classList.add('abierto');
+}
+
+function cerrar() {
+  lightbox.classList.remove('abierto');
+  lightboxImg.src = '';
+  fotoAbierta = null;
+}
+
+lightbox.addEventListener('click', e => { if (e.target === lightbox) cerrar(); });
+btnCerrar.addEventListener('click', cerrar);
+btnBorrar.addEventListener('click', () => {
+  if (!fotoAbierta) return;
+  const nombre = fotoAbierta;
+  cerrar();
+  borrar('/api/admin/borrar-foto', {nombre});
+});
+document.addEventListener('keydown', e => { if (e.key === 'Escape') cerrar(); });
 
 async function cargar() {
   const [pf, pm] = await Promise.all([
@@ -40,6 +83,7 @@ async function cargar() {
     d.className = 'item';
     const img = document.createElement('img');
     img.src = src;
+    img.onclick = () => abrir(src, nombre);
     const b = document.createElement('button');
     b.className = 'x';
     b.textContent = 'X';
