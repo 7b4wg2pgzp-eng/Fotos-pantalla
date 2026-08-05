@@ -94,14 +94,50 @@ if _drive_service is None and GDRIVE_SA_JSON_B64:
         print("[drive] no se pudo inicializar la API de Drive, se usara la carpeta local.")
 
 
-def _drive_find_id(name: str):
-    """Devuelve el id del archivo con ese nombre en la carpeta, o None."""
+_subcarpetas = {}
+_subcarpetas_lock = threading.Lock()
+
+
+def get_subfolder(nombre: str):
+    """Devuelve el id de una subcarpeta dentro de la carpeta del evento,
+    creándola la primera vez. Cachea el resultado."""
+    if not _drive_service or not GDRIVE_FOLDER_ID:
+        return GDRIVE_FOLDER_ID or None
+    with _subcarpetas_lock:
+        if nombre in _subcarpetas:
+            return _subcarpetas[nombre]
+        try:
+            q = ("name = '" + nombre + "' and mimeType = 'application/vnd.google-apps.folder'"
+                 " and trashed = false and '" + GDRIVE_FOLDER_ID + "' in parents")
+            res = _drive_service.files().list(q=q, fields="files(id)", pageSize=1).execute()
+            archivos = res.get("files", [])
+            if archivos:
+                fid = archivos[0]["id"]
+            else:
+                meta = {
+                    "name": nombre,
+                    "mimeType": "application/vnd.google-apps.folder",
+                    "parents": [GDRIVE_FOLDER_ID],
+                }
+                fid = _drive_service.files().create(body=meta, fields="id").execute()["id"]
+                print(f"[drive] subcarpeta creada: {nombre}")
+            _subcarpetas[nombre] = fid
+            return fid
+        except Exception:
+            import traceback
+            traceback.print_exc()
+            return GDRIVE_FOLDER_ID
+
+
+def _drive_find_id(name: str, parent_id=None):
+    """Devuelve el id del archivo con ese nombre en la carpeta indicada."""
     if not _drive_service:
         return None
     try:
+        parent = parent_id or GDRIVE_FOLDER_ID
         q = "name = '" + name.replace("'", "") + "' and trashed = false"
-        if GDRIVE_FOLDER_ID:
-            q += " and '" + GDRIVE_FOLDER_ID + "' in parents"
+        if parent:
+            q += " and '" + parent + "' in parents"
         res = _drive_service.files().list(q=q, fields="files(id)", pageSize=1).execute()
         archivos = res.get("files", [])
         return archivos[0]["id"] if archivos else None
@@ -111,21 +147,22 @@ def _drive_find_id(name: str):
         return None
 
 
-def drive_upsert(name: str, data: bytes) -> None:
+def drive_upsert(name: str, data: bytes, parent_id=None) -> None:
     """Crea o reemplaza un archivo en Drive (para mensajes.json y previews)."""
     if not _drive_service:
         return
     try:
         from googleapiclient.http import MediaIoBaseUpload
+        parent = parent_id or GDRIVE_FOLDER_ID
         mimetype = mimetypes.guess_type(name)[0] or "application/octet-stream"
         media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
-        existente = _drive_find_id(name)
+        existente = _drive_find_id(name, parent)
         if existente:
             _drive_service.files().update(fileId=existente, media_body=media).execute()
         else:
             metadata = {"name": name}
-            if GDRIVE_FOLDER_ID:
-                metadata["parents"] = [GDRIVE_FOLDER_ID]
+            if parent:
+                metadata["parents"] = [parent]
             _drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
     except Exception:
         import traceback
@@ -148,8 +185,9 @@ def save_original(name: str, data: bytes) -> None:
         try:
             from googleapiclient.http import MediaIoBaseUpload
             metadata = {"name": name}
-            if GDRIVE_FOLDER_ID:
-                metadata["parents"] = [GDRIVE_FOLDER_ID]
+            destino = get_subfolder("Originales")
+            if destino:
+                metadata["parents"] = [destino]
             mimetype = mimetypes.guess_type(name)[0] or "application/octet-stream"
             media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
             _drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
@@ -201,7 +239,9 @@ def _write_messages(mensajes) -> None:
         json.dump(mensajes, f, ensure_ascii=False)
     tmp.replace(MESSAGES_FILE)
     try:
-        drive_upsert("mensajes.json", json.dumps(mensajes, ensure_ascii=False).encode("utf-8"))
+        drive_upsert("mensajes.json",
+                     json.dumps(mensajes, ensure_ascii=False).encode("utf-8"),
+                     get_subfolder("Datos"))
     except Exception:
         import traceback
         traceback.print_exc()
@@ -276,7 +316,7 @@ def save_upload(file_storage) -> Optional[str]:
         with open(CACHE_DIR / cache_name, "wb") as f:
             f.write(preview_data)
         # Copia chica en Drive para poder rearmar el loop si el server reinicia.
-        drive_upsert(f"preview-{uid}.jpg", preview_data)
+        drive_upsert(f"preview-{uid}.jpg", preview_data, get_subfolder("Previews"))
         return cache_name
     except Exception as e:
         print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} - {e}")
@@ -418,7 +458,7 @@ def _restore_from_drive():
         return
     try:
         # 1) Saludos
-        mid = _drive_find_id("mensajes.json")
+        mid = _drive_find_id("mensajes.json", get_subfolder("Datos"))
         if mid and not MESSAGES_FILE.exists():
             datos = drive_download(mid)
             if datos:
@@ -428,9 +468,10 @@ def _restore_from_drive():
 
         # 2) Previews de fotos
         corte = time.time() - RETENTION_SECONDS
+        carpeta_previews = get_subfolder("Previews")
         q = "name contains 'preview-' and trashed = false"
-        if GDRIVE_FOLDER_ID:
-            q += " and '" + GDRIVE_FOLDER_ID + "' in parents"
+        if carpeta_previews:
+            q += " and '" + carpeta_previews + "' in parents"
         token, recuperadas = None, 0
         while True:
             res = _drive_service.files().list(
