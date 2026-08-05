@@ -47,11 +47,37 @@ _default_photos_dir = (_gdrive / "EventPhotos") if _gdrive else (Path.home() / "
 PHOTOS_DIR = Path(os.environ.get("EVENTPHOTOS_DIR", str(_default_photos_dir)))
 PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
 
-GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID")
+GDRIVE_FOLDER_ID = os.environ.get("GDRIVE_FOLDER_ID", "").strip()
 GDRIVE_SA_JSON_B64 = os.environ.get("GDRIVE_SERVICE_ACCOUNT_B64")
 
+# OAuth con cuenta personal: usa TU cuota de Drive (las Service Accounts no tienen).
+GOOGLE_CLIENT_ID = os.environ.get("GOOGLE_CLIENT_ID", "").strip()
+GOOGLE_CLIENT_SECRET = os.environ.get("GOOGLE_CLIENT_SECRET", "").strip()
+GOOGLE_REFRESH_TOKEN = os.environ.get("GOOGLE_REFRESH_TOKEN", "").strip()
+
 _drive_service = None
-if GDRIVE_SA_JSON_B64:
+
+if GOOGLE_REFRESH_TOKEN and GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET:
+    try:
+        from google.oauth2.credentials import Credentials
+        from googleapiclient.discovery import build
+
+        _credentials = Credentials(
+            None,
+            refresh_token=GOOGLE_REFRESH_TOKEN,
+            token_uri="https://oauth2.googleapis.com/token",
+            client_id=GOOGLE_CLIENT_ID,
+            client_secret=GOOGLE_CLIENT_SECRET,
+            scopes=["https://www.googleapis.com/auth/drive"],
+        )
+        _drive_service = build("drive", "v3", credentials=_credentials)
+        print("[drive] conectado via OAuth (cuenta personal).")
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        print("[drive] fallo el OAuth, se probara con Service Account.")
+
+if _drive_service is None and GDRIVE_SA_JSON_B64:
     try:
         from google.oauth2 import service_account
         from googleapiclient.discovery import build
