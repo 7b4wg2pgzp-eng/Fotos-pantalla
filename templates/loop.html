@@ -3,10 +3,19 @@
 <head>
 <meta charset="utf-8">
 <title>{{ event_name }} — Loop</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@500;600&display=swap" rel="stylesheet">
 <style>
+  :root{
+    color-scheme: dark;
+    --noir:#040306;
+    --gold:#d9a441;
+    --gold-lit:#f6e0a4;
+  }
   html,body{
     margin:0; padding:0; width:100%; height:100%;
-    background:#0A0710;
+    background:var(--noir);
     overflow:hidden;
   }
   .stage{ position:relative; width:100vw; height:100vh; }
@@ -18,55 +27,22 @@
     opacity:0;
     transition:opacity 1.5s ease;
   }
-  .slide.active{
-    opacity:1;
-  }
+  .slide.active{ opacity:1; }
   .vignette{
     position:absolute; inset:0;
     pointer-events:none;
-    background:radial-gradient(circle at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
-  }
-  .empty{
-    position:absolute; inset:0;
-    display:flex; align-items:
-
-cd ~/Downloads/"eventphotos 3"
-cat > templates/loop.html << 'PYEOF'
-<!doctype html>
-<html lang="es">
-<head>
-<meta charset="utf-8">
-<title>{{ event_name }} — Loop</title>
-<style>
-  html,body{
-    margin:0; padding:0; width:100%; height:100%;
-    background:#0A0710;
-    overflow:hidden;
-  }
-  .stage{ position:relative; width:100vw; height:100vh; }
-  .slide{
-    position:absolute; inset:0;
-    background-size:contain;
-    background-repeat:no-repeat;
-    background-position:center;
-    opacity:0;
-    transition:opacity 1.5s ease;
-  }
-  .slide.active{
-    opacity:1;
-  }
-  .vignette{
-    position:absolute; inset:0;
-    pointer-events:none;
-    background:radial-gradient(circle at 50% 50%, transparent 55%, rgba(0,0,0,0.55) 100%);
+    background:
+      radial-gradient(ellipse at 50% 50%, transparent 52%, rgba(4,3,6,.72) 100%),
+      radial-gradient(ellipse at 50% 0%, rgba(217,164,65,.07), transparent 60%);
   }
   .empty{
     position:absolute; inset:0;
     display:flex; align-items:center; justify-content:center;
-    color:#5c4f74;
-    font-family:sans-serif;
+    font-family:'Barlow Condensed', sans-serif;
+    text-transform:uppercase;
+    letter-spacing:.34em;
     font-size:20px;
-    letter-spacing:.05em;
+    color:rgba(246,224,164,.34);
   }
   @media (prefers-reduced-motion: reduce){
     .slide{ transition:none; }
@@ -75,7 +51,7 @@ cat > templates/loop.html << 'PYEOF'
 </head>
 <body>
   <div class="stage" id="stage">
-    <div class="empty" id="empty">Esperando fotos…</div>
+    <div class="empty" id="empty">Esperando fotos</div>
     <div class="vignette"></div>
   </div>
 
@@ -97,7 +73,7 @@ cat > templates/loop.html << 'PYEOF'
         photos = data.photos;
         rebuildSlides();
       }
-    } catch (e) { /* silencioso: sigue mostrando lo que ya tiene */ }
+    } catch (e) { /* silencioso */ }
   }
 
   function rebuildSlides() {
@@ -118,7 +94,7 @@ cat > templates/loop.html << 'PYEOF'
     if (!slideEls.length) return;
     slideEls.forEach(el => el.classList.remove('active'));
     const el = slideEls[index];
-    void el.offsetWidth; // fuerza el reinicio del fundido
+    void el.offsetWidth;
     el.classList.add('active');
     index = (index + 1) % slideEls.length;
   }
