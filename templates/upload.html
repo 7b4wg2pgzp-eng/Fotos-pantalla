@@ -108,6 +108,43 @@
     color:rgba(240,233,219,.45);
   }
 
+
+  /* ---- Destello para llamar la atención ----
+     Un brillo que cruza el botón cada tantos segundos, más un latido muy leve.
+     Va sólo en los botones accionables: si Enviar está deshabilitado no destella,
+     porque invitaría a tocar algo que todavía no hace nada. */
+  .pill.shine{ position:relative; overflow:hidden; }
+  .pill.shine::after{
+    content:""; position:absolute; top:-60%; bottom:-60%; left:-40%;
+    width:34%; pointer-events:none;
+    background:linear-gradient(100deg,
+      rgba(255,255,255,0) 0%, rgba(255,255,255,.55) 50%, rgba(255,255,255,0) 100%);
+    transform:skewX(-18deg) translateX(-260%);
+    animation:destello 4.6s ease-in-out infinite;
+  }
+  #sendBtn.shine{ animation:latido-suave 4.6s ease-in-out infinite; }
+  #vivoBtn.shine::after{
+    background:linear-gradient(100deg,
+      rgba(246,224,164,0) 0%, rgba(246,224,164,.32) 50%, rgba(246,224,164,0) 100%);
+    animation-delay:2.3s;   /* alternado, para que no destellen los dos juntos */
+  }
+  #vivoBtn.shine{ animation:latido-suave 4.6s ease-in-out 2.3s infinite; }
+  .pill:disabled.shine::after{ animation:none; opacity:0; }
+
+  @keyframes destello{
+    0%,58%   { transform:skewX(-18deg) translateX(-260%); }
+    78%,100% { transform:skewX(-18deg) translateX(560%); }
+  }
+  @keyframes latido-suave{
+    0%,54%,100%{ transform:scale(1); }
+    62%{ transform:scale(1.022); }
+    70%{ transform:scale(1); }
+  }
+  @media (prefers-reduced-motion:reduce){
+    .pill.shine::after{ animation:none; opacity:0; }
+    #sendBtn.shine, #vivoBtn.shine{ animation:none; }
+  }
+
   input[type=file]{ display:none; }
   .preview{ display:grid; grid-template-columns:repeat(4,1fr); gap:8px; margin:24px 0 6px; }
   .preview img{
@@ -226,7 +263,7 @@
 
     <div class="divider">o también</div>
 
-    <a class="pill full ghost" id="vivoBtn" href="https://camara.nicovasquezdjs.com/">
+    <a class="pill full ghost shine" id="vivoBtn" href="https://camara.nicovasquezdjs.com/">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M23 7l-7 5 7 5V7z"/>
@@ -255,6 +292,8 @@
 
   function refreshSendState() {
     sendBtn.disabled = selected.length === 0 && mensajeEl.value.trim() === '';
+    // El brillo sólo cuando el botón realmente hace algo.
+    sendBtn.classList.toggle('shine', !sendBtn.disabled);
   }
 
   pickBtn.addEventListener('click', () => fileInput.click());
