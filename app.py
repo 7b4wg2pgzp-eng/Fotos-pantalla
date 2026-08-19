@@ -33,7 +33,7 @@ EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
 # Los valores por defecto son los de Nico Vásquez, o sea que un servicio que no
 # defina nada sigue viéndose exactamente igual que antes.
 MARCA = {
-    "titulo": os.environ.get("MARCA_TITULO", "Fiesta Interactiva"),
+    "titulo": os.environ.get("MARCA_TITULO", "Álbum Interactivo"),
     "duenio": os.environ.get("MARCA_DUENIO", "Nico Vásquez"),
     "bajada": os.environ.get("MARCA_BAJADA", "Show Audiovisual para Eventos"),
     "logo":   os.environ.get("MARCA_LOGO",   "logo.webp"),
