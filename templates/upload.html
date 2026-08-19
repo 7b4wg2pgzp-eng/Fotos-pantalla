@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#040306">
-<title>Fiesta Interactiva · Nico Vásquez</title>
+<title>{{ marca.titulo }}{% if marca.duenio %} · {{ marca.duenio }}{% endif %}</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Anton&family=Barlow+Condensed:wght@500;600&family=Manrope:wght@400;500;700&family=Playfair+Display:ital,wght@1,500&display=swap" rel="stylesheet">
@@ -229,7 +229,7 @@
 <body>
   <div class="card">
     <p class="eyebrow">Muro de fotos en vivo</p>
-    <h1>Fiesta Interactiva</h1>
+    <h1>{{ marca.titulo }}</h1>
     <div class="hr"></div>
     <p class="lead">Sumá tus fotos y dejá tu saludo. Aparecen en la pantalla de la fiesta.</p>
 
@@ -261,9 +261,10 @@
     <div class="status" id="status" role="status"></div>
 
 
+    {% if marca.vivo_url %}
     <div class="divider">o también</div>
 
-    <a class="pill full ghost shine" id="vivoBtn" href="https://camara.nicovasquezdjs.com/">
+    <a class="pill full ghost shine" id="vivoBtn" href="{{ marca.vivo_url }}">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7"
            stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
         <path d="M23 7l-7 5 7 5V7z"/>
@@ -272,10 +273,11 @@
       Salir en vivo
     </a>
     <p class="vivo-nota">Tu cámara en la pantalla · de a uno por vez</p>
+    {% endif %}
 
     <div class="firma">
-      <img src="/static/logo.webp" alt="Nico Vásquez" class="firma__logo">
-      <p class="firma__sub">Show Audiovisual para Eventos</p>
+      <img src="/static/{{ marca.logo }}" alt="{{ marca.duenio }}" class="firma__logo">
+      {% if marca.bajada %}<p class="firma__sub">{{ marca.bajada }}</p>{% endif %}
     </div>
   </div>
 
@@ -315,14 +317,17 @@
 
 
   // Le pasa el nombre ya cargado a la pagina de camara, asi no lo escriben dos veces.
+  // El boton puede no existir: hay clientes sin camara en vivo.
   const vivoBtn = document.getElementById('vivoBtn');
-  function syncVivoLink() {
-    const base = 'https://camara.nicovasquezdjs.com/';
-    const n = (nombreEl.value || '').trim().slice(0, 24);
-    vivoBtn.href = n ? base + '?nombre=' + encodeURIComponent(n) : base;
+  if (vivoBtn) {
+    const base = vivoBtn.getAttribute('href');
+    const syncVivoLink = () => {
+      const n = (nombreEl.value || '').trim().slice(0, 24);
+      vivoBtn.href = n ? base + '?nombre=' + encodeURIComponent(n) : base;
+    };
+    nombreEl.addEventListener('input', syncVivoLink);
+    syncVivoLink();
   }
-  nombreEl.addEventListener('input', syncVivoLink);
-  syncVivoLink();
 
   mensajeEl.addEventListener('input', () => {
     countEl.textContent = mensajeEl.value.length;
