@@ -24,6 +24,22 @@ except ImportError:
 app = Flask(__name__)
 
 EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
+
+# ---- Marca ----
+# La misma aplicación sirve a más de un cliente. Lo único que cambia entre uno
+# y otro es el título, la firma y el logo, así que sale de variables de entorno
+# y no de una copia del código: una rama aparte se queda vieja sola y las
+# mejoras dejan de llegarle.
+# Los valores por defecto son los de Nico Vásquez, o sea que un servicio que no
+# defina nada sigue viéndose exactamente igual que antes.
+MARCA = {
+    "titulo": os.environ.get("MARCA_TITULO", "Fiesta Interactiva"),
+    "duenio": os.environ.get("MARCA_DUENIO", "Nico Vásquez"),
+    "bajada": os.environ.get("MARCA_BAJADA", "Show Audiovisual para Eventos"),
+    "logo":   os.environ.get("MARCA_LOGO",   "logo.webp"),
+    # Vacío = no se muestra el botón "Salir en vivo".
+    "vivo_url": os.environ.get("MARCA_VIVO_URL", "https://camara.nicovasquezdjs.com/"),
+}
 PORT = int(os.environ.get("PORT", 5050))
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
 
@@ -325,17 +341,17 @@ def save_upload(file_storage) -> Optional[str]:
 
 @app.route("/")
 def upload_page():
-    return render_template("upload.html", event_name=EVENT_NAME)
+    return render_template("upload.html", event_name=EVENT_NAME, marca=MARCA)
 
 
 @app.route("/loop")
 def loop_page():
-    return render_template("loop.html", event_name=EVENT_NAME)
+    return render_template("loop.html", event_name=EVENT_NAME, marca=MARCA)
 
 
 @app.route("/saludos")
 def saludos_page():
-    return render_template("saludos.html", event_name=EVENT_NAME)
+    return render_template("saludos.html", event_name=EVENT_NAME, marca=MARCA)
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -410,7 +426,7 @@ def admin_page():
         return "Falta configurar ADMIN_KEY en Render", 500
     if not _check_admin():
         return "Clave incorrecta", 403
-    return render_template("admin.html", event_name=EVENT_NAME, admin_key=ADMIN_KEY)
+    return render_template("admin.html", event_name=EVENT_NAME, marca=MARCA, admin_key=ADMIN_KEY)
 
 
 @app.route("/api/admin/borrar-foto", methods=["POST"])
