@@ -3,7 +3,10 @@ import io
 import time
 import uuid
 import json
+import hmac
 import base64
+import hashlib
+import secrets
 import threading
 import mimetypes
 import subprocess
@@ -399,18 +402,97 @@ def serve_photo(filename):
     return send_from_directory(CACHE_DIR, filename)
 
 
+# ---- Clave del moderador ----
+# Se estrena como el PIN de un cajero: la primera persona que abre /admin elige
+# la suya. Se guarda como hash (nunca la clave en claro) en la carpeta Datos de
+# Drive, porque el disco de Render en plan gratuito es efimero y se borra en
+# cada reinicio. El nombre del archivo lleva el id del servicio de Render, asi
+# main y vj tienen cada uno su clave aunque compartan la carpeta de Drive.
+ADMIN_STATE_NAME = "admin-" + (os.environ.get("RENDER_SERVICE_ID") or "local") + ".json"
+ADMIN_STATE_FILE = CACHE_DIR / ADMIN_STATE_NAME
+_admin_lock = threading.Lock()
+
+
+def _admin_hash(clave: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", clave.encode(), salt.encode(), 200_000).hex()
+
+
+def _admin_state():
+    """El estado de la clave: primero el cache local, si no esta, Drive."""
+    if ADMIN_STATE_FILE.exists():
+        try:
+            with open(ADMIN_STATE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    fid = _drive_find_id(ADMIN_STATE_NAME, get_subfolder("Datos"))
+    if fid:
+        datos = drive_download(fid)
+        if datos:
+            try:
+                estado = json.loads(datos)
+            except Exception:
+                return None
+            with open(ADMIN_STATE_FILE, "wb") as f:
+                f.write(datos)
+            return estado
+    return None
+
+
+def _admin_set_key(clave: str) -> None:
+    salt = secrets.token_hex(16)
+    datos = json.dumps({
+        "salt": salt,
+        "hash": _admin_hash(clave, salt),
+        "creada": int(time.time()),
+    }).encode("utf-8")
+    with _admin_lock:
+        with open(ADMIN_STATE_FILE, "wb") as f:
+            f.write(datos)
+        drive_upsert(ADMIN_STATE_NAME, datos, get_subfolder("Datos"))
+
+
+def _admin_configurada() -> bool:
+    return bool(ADMIN_KEY) or _admin_state() is not None
+
+
 def _check_admin():
-    key = request.args.get("key") or request.form.get("key") or ""
-    return bool(ADMIN_KEY) and key == ADMIN_KEY
+    clave = request.args.get("key") or request.form.get("key") or ""
+    if not clave:
+        return False
+    if ADMIN_KEY and hmac.compare_digest(clave, ADMIN_KEY):
+        return True
+    estado = _admin_state()
+    if not estado:
+        return False
+    return hmac.compare_digest(_admin_hash(clave, estado["salt"]), estado["hash"])
 
 
-@app.route("/admin")
+@app.route("/admin", methods=["GET", "POST"])
 def admin_page():
-    if not ADMIN_KEY:
-        return "Falta configurar ADMIN_KEY en Render", 500
+    # 1) Todavia no hay clave: la primera persona que entra elige la suya.
+    if not _admin_configurada():
+        if request.method == "POST":
+            nueva = request.form.get("nueva", "")
+            repetir = request.form.get("repetir", "")
+            if len(nueva) < 6:
+                return render_template(
+                    "admin_estrenar.html",
+                    error="La clave tiene que tener al menos 6 caracteres."), 400
+            if nueva != repetir:
+                return render_template(
+                    "admin_estrenar.html", error="Las dos no coinciden."), 400
+            _admin_set_key(nueva)
+            return render_template("admin.html", event_name=EVENT_NAME, admin_key=nueva)
+        return render_template("admin_estrenar.html", error=None)
+
+    # 2) Ya hay clave: formulario de siempre.
     if not _check_admin():
-        return "Clave incorrecta", 403
-    return render_template("admin.html", event_name=EVENT_NAME, admin_key=ADMIN_KEY)
+        intento = bool(request.args.get("key") or request.form.get("key"))
+        return render_template("admin_login.html", error=intento), (403 if intento else 200)
+
+    clave = request.args.get("key") or request.form.get("key") or ADMIN_KEY
+    return render_template("admin.html", event_name=EVENT_NAME, admin_key=clave)
 
 
 @app.route("/api/admin/borrar-foto", methods=["POST"])
