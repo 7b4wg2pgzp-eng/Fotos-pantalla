@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow">
+<title>Moderar · entrar</title>
+<style>
+:root{color-scheme:dark;}
+body{margin:0;min-height:100dvh;display:flex;align-items:center;justify-content:center;
+  padding:24px;box-sizing:border-box;background:#150F1F;color:#F5F0FA;
+  font-family:system-ui,-apple-system,sans-serif;}
+form{width:100%;max-width:340px;}
+h1{font-size:19px;margin:0 0 6px;color:#E8C468;font-weight:600;}
+p.sub{margin:0 0 22px;font-size:14px;color:#9384AC;line-height:1.45;}
+label{display:block;font-size:13px;color:#9384AC;margin-bottom:7px;}
+input[type=password]{width:100%;box-sizing:border-box;font-size:16px;padding:13px 14px;
+  border-radius:12px;border:1px solid rgba(232,196,104,.28);background:rgba(255,255,255,.05);
+  color:#F5F0FA;}
+input[type=password]:focus{outline:2px solid #E8C468;outline-offset:1px;border-color:transparent;}
+button{width:100%;margin-top:14px;font-size:16px;font-weight:600;padding:13px;
+  border:none;border-radius:12px;cursor:pointer;color:#150F1F;
+  background:linear-gradient(180deg,#F0D083,#E8C468);}
+.error{margin:0 0 18px;padding:11px 13px;border-radius:10px;font-size:14px;
+  background:rgba(220,30,60,.14);border:1px solid rgba(220,30,60,.4);color:#FFC9D3;}
+@media (hover:hover){button:hover{filter:brightness(1.06);}}
+</style>
+</head>
+<body>
+<form method="post" action="/admin">
+  <h1>Moderar</h1>
+  <p class="sub">Borrar fotos y saludos de la pantalla. Necesitás la clave.</p>
+  {% if error %}<p class="error">Clave incorrecta. Probá de nuevo.</p>{% endif %}
+  <input type="text" name="usuario" autocomplete="username" value="fotospantalla" hidden readonly>
+  <label for="key">Clave</label>
+  <input type="password" id="key" name="key" autocomplete="current-password" autofocus required>
+  <button type="submit">Entrar</button>
+</form>
+</body>
+</html>
