@@ -1,6 +1,13 @@
 <!doctype html>
 <html lang="es">
 <head>
+{% if marca.logo == "logo.webp" %}
+<link rel="icon" href="https://www.nicovasquez.com.ar/favicon.png" type="image/png">
+<link rel="apple-touch-icon" href="https://www.nicovasquez.com.ar/apple-touch-icon.png">
+{% else %}
+<link rel="icon" href="/static/{{ marca.logo }}" type="image/png">
+<link rel="apple-touch-icon" href="/static/{{ marca.logo }}">
+{% endif %}
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="theme-color" content="#040306">
