@@ -231,6 +231,32 @@
   @media (prefers-reduced-motion: reduce){
     #pickBtn{ animation:none; }
   }
+  .wall{max-width:900px;margin:48px auto 0;padding-top:28px;border-top:1px solid var(--line);}
+  .wall__head{display:flex;align-items:center;justify-content:space-between;gap:16px;}
+  .wall h2{font-family:'Anton',sans-serif;font-weight:400;font-size:26px;text-transform:uppercase;margin:0;color:var(--gold-lit);}
+  .wall__live{font-size:12px;color:var(--gold-lit);white-space:nowrap;}
+  .wall__live::before{content:'';display:inline-block;width:7px;height:7px;border-radius:50%;background:var(--gold);margin-right:7px;}
+  .wall__hint,.wall__status{font-size:13px;line-height:1.6;color:var(--muted);}
+  .wall__hint{margin:10px 0 20px;}
+  .wall__status{margin:20px 0;text-align:center;}
+  .wall__grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:4px;}
+  .wall__photo{display:block;position:relative;padding:0;border:0;background:#18130d;cursor:pointer;aspect-ratio:1;overflow:hidden;}
+  .wall__photo img{display:block;width:100%;height:100%;object-fit:cover;}
+  .wall__photo:focus-visible,.viewer button:focus-visible{outline:3px solid var(--gold-lit);outline-offset:3px;z-index:1;}
+  .viewer{width:100%;max-width:none;height:100%;max-height:none;margin:0;padding:0;border:0;background:rgba(4,3,6,.98);color:var(--bone);}
+  .viewer::backdrop{background:#040306;}
+  .viewer[open]{display:flex;flex-direction:column;}
+  .viewer__bar{display:flex;align-items:center;justify-content:space-between;padding:16px 18px;padding-top:max(16px,env(safe-area-inset-top));gap:12px;}
+  .viewer__bar h2{margin:0;font:400 20px 'Anton',sans-serif;}
+  .viewer button{min-width:48px;min-height:48px;border:1px solid var(--line);border-radius:50%;background:#19130b;color:var(--gold-lit);font-size:24px;cursor:pointer;}
+  .viewer button:disabled{opacity:.3;cursor:default;}
+  .viewer__stage{flex:1;min-height:0;display:flex;align-items:center;justify-content:center;overflow:auto;}
+  .viewer__image{display:block;max-width:100%;max-height:100%;width:auto;height:auto;object-fit:contain;}
+  .viewer__nav{display:flex;align-items:center;justify-content:center;gap:24px;padding:16px;padding-bottom:max(16px,env(safe-area-inset-bottom));}
+  .viewer__count{min-width:90px;text-align:center;font-size:13px;}
+  body.viewer-open{overflow:hidden;}
+  @media(min-width:700px){.wall__grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:6px;}}
+
 </style>
 </head>
 <body>
@@ -282,6 +308,32 @@
     <p class="vivo-nota">Tu cámara en la pantalla · de a uno por vez</p>
     {% endif %}
 
+  </div>
+  <section class="wall" aria-labelledby="wallTitle">
+    <div class="wall__head">
+      <h2 id="wallTitle">Fotos de la fiesta</h2>
+      <span class="wall__live" id="wallLive">En espera</span>
+    </div>
+    <p class="wall__hint">Las mismas fotos que ves en las pantallas. Tocá una para verla grande.</p>
+    <p class="wall__status" id="wallStatus" role="status">Cargando las fotos…</p>
+    <div class="wall__grid" id="wallGrid"></div>
+    <noscript><p class="wall__status">Activá JavaScript para ver las fotos de la fiesta.</p></noscript>
+  </section>
+
+  <dialog class="viewer" id="photoViewer" aria-labelledby="viewerTitle">
+    <div class="viewer__bar">
+      <h2 id="viewerTitle">Fotos de la fiesta</h2>
+      <button type="button" id="viewerClose" aria-label="Cerrar foto">×</button>
+    </div>
+    <div class="viewer__stage"><img class="viewer__image" id="viewerImage" alt=""></div>
+    <div class="viewer__nav">
+      <button type="button" id="viewerPrev" aria-label="Foto anterior">‹</button>
+      <span class="viewer__count" id="viewerCount" aria-live="polite"></span>
+      <button type="button" id="viewerNext" aria-label="Foto siguiente">›</button>
+    </div>
+  </dialog>
+
+  <div class="card">
     <div class="firma">
       <img src="/static/{{ marca.logo }}" alt="{{ marca.duenio }}" class="firma__logo">
       {% if marca.bajada %}<p class="firma__sub">{{ marca.bajada }}</p>{% endif %}
@@ -363,6 +415,7 @@
         fileInput.value = '';
         mensajeEl.value = '';
         countEl.textContent = '0';
+        refreshWall();
       } else {
         throw new Error(data.error || 'error');
       }
@@ -372,6 +425,121 @@
     }
     refreshSendState();
   });
+  // Usa la misma lista y la misma ventana de retención que el loop de pantalla.
+  const wallGrid = document.getElementById('wallGrid');
+  const wallStatus = document.getElementById('wallStatus');
+  const viewer = document.getElementById('photoViewer');
+  const viewerImage = document.getElementById('viewerImage');
+  const viewerCount = document.getElementById('viewerCount');
+  const viewerPrev = document.getElementById('viewerPrev');
+  const viewerNext = document.getElementById('viewerNext');
+  let wallPhotos = [];
+  let currentPhoto = null;
+  let wallLoading = false;
+  let wallLoaded = false;
+
+  function updateViewer() {
+    const index = wallPhotos.indexOf(currentPhoto);
+    if (index < 0) { if (viewer.open) viewer.close(); return; }
+    viewerImage.src = currentPhoto;
+    viewerImage.alt = `Foto ${index + 1} de la fiesta`;
+    viewerCount.textContent = `${index + 1} de ${wallPhotos.length}`;
+    viewerPrev.disabled = index === 0;
+    viewerNext.disabled = index === wallPhotos.length - 1;
+  }
+
+  function openPhoto(src) {
+    currentPhoto = src;
+    updateViewer();
+    if (!viewer.open) viewer.showModal();
+    document.body.classList.add('viewer-open');
+  }
+
+  function movePhoto(step) {
+    const next = wallPhotos.indexOf(currentPhoto) + step;
+    if (next >= 0 && next < wallPhotos.length) {
+      currentPhoto = wallPhotos[next];
+      updateViewer();
+    }
+  }
+
+  document.getElementById('viewerClose').addEventListener('click', () => viewer.close());
+  viewerPrev.addEventListener('click', () => movePhoto(-1));
+  viewerNext.addEventListener('click', () => movePhoto(1));
+  viewer.addEventListener('keydown', event => {
+    if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      movePhoto(event.key === 'ArrowLeft' ? -1 : 1);
+    }
+  });
+  viewer.addEventListener('close', () => {
+    document.body.classList.remove('viewer-open');
+    viewerImage.removeAttribute('src');
+    const button = Array.from(wallGrid.children).find(item => item.dataset.photo === currentPhoto);
+    (button || document.getElementById('pickBtn')).focus({preventScroll:true});
+    currentPhoto = null;
+  });
+
+  function renderWall(photos) {
+    // Conserva los nodos existentes: actualizar no interrumpe el foco ni recarga todo el muro.
+    const existing = new Map(Array.from(wallGrid.children).map(item => [item.dataset.photo, item]));
+    const keep = new Set(photos);
+    for (const [src, button] of existing) if (!keep.has(src)) button.remove();
+    photos.forEach((src, index) => {
+      let button = existing.get(src);
+      if (!button) {
+        button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'wall__photo';
+        button.dataset.photo = src;
+        const img = document.createElement('img');
+        img.src = src;
+        img.alt = '';
+        img.loading = 'lazy';
+        img.decoding = 'async';
+        button.appendChild(img);
+        button.addEventListener('click', () => openPhoto(src));
+      }
+      button.setAttribute('aria-label', `Abrir foto ${index + 1} de la fiesta`);
+      if (wallGrid.children[index] !== button) wallGrid.insertBefore(button, wallGrid.children[index] || null);
+    });
+    wallPhotos = photos;
+    if (viewer.open) updateViewer();
+  }
+
+  async function refreshWall() {
+    if (wallLoading || document.hidden) return;
+    wallLoading = true;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 15000);
+    try {
+      const res = await fetch('/api/photos', {cache:'no-store', signal:controller.signal});
+      if (!res.ok) throw new Error('Fotos no disponibles');
+      const data = await res.json();
+      if (!Array.isArray(data.photos) || data.photos.some(src => typeof src !== 'string' || !/^\/photos\/[^/\\?#]+\.jpg$/i.test(src))) {
+        throw new Error('Lista de fotos inválida');
+      }
+      const photos = Array.from(new Set(data.photos)).reverse();
+      if (JSON.stringify(photos) !== JSON.stringify(wallPhotos)) renderWall(photos);
+      wallLoaded = true;
+      document.getElementById('wallLive').textContent = photos.length ? 'En vivo' : 'En espera';
+      wallStatus.textContent = photos.length ? '' : 'El muro está esperando las fotos de la fiesta. ¡Subí la primera!';
+      wallStatus.hidden = photos.length > 0;
+    } catch (error) {
+      wallStatus.hidden = false;
+      document.getElementById('wallLive').textContent = 'Reconectando';
+      wallStatus.textContent = wallLoaded && wallPhotos.length
+        ? 'Se perdió la conexión. El muro se actualizará cuando vuelva.'
+        : 'No pudimos cargar las fotos. Volvemos a intentar en unos segundos.';
+    } finally {
+      clearTimeout(timeout);
+      wallLoading = false;
+    }
+  }
+  refreshWall();
+  setInterval(refreshWall, 8000);
+  document.addEventListener('visibilitychange', () => { if (!document.hidden) refreshWall(); });
+
 </script>
 </body>
 </html>
