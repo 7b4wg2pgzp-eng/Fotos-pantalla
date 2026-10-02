@@ -9,12 +9,13 @@ import hashlib
 import secrets
 import threading
 import mimetypes
+import encodings.idna  # Importar antes de iniciar el hilo de restauración de Drive.
 import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
 
-from flask import Flask, request, jsonify, render_template, send_from_directory, abort
+from flask import Flask, request, jsonify, render_template, send_from_directory, abort, redirect
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageOps
 
@@ -25,6 +26,7 @@ except ImportError:
     pillow_heif = None
 
 app = Flask(__name__)
+
 
 EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
 
@@ -616,3 +618,4 @@ if __name__ == "__main__":
     print(f"Loop fotos (OBS):   http://0.0.0.0:{PORT}/loop")
     print(f"Saludos (VJ):       http://0.0.0.0:{PORT}/saludos")
     app.run(host="0.0.0.0", port=PORT, debug=False)
+
