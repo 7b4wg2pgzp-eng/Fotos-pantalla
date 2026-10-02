@@ -41,7 +41,7 @@ MARCA = {
     "bajada": os.environ.get("MARCA_BAJADA", "Show Audiovisual para Eventos"),
     "logo":   os.environ.get("MARCA_LOGO",   "logo.webp"),
     # Vacío = no se muestra el botón "Salir en vivo".
-    "vivo_url": os.environ.get("MARCA_VIVO_URL", "https://camara.nicovasquezdjs.com/"),
+    "vivo_url": os.environ.get("MARCA_VIVO_URL", "https://camara.nicovasquez.com.ar/"),
 }
 PORT = int(os.environ.get("PORT", 5050))
 ADMIN_KEY = os.environ.get("ADMIN_KEY", "")
