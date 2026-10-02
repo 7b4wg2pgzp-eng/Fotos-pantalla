@@ -28,6 +28,16 @@ except ImportError:
 app = Flask(__name__)
 
 
+@app.before_request
+def redirect_legacy_pages():
+    """Migrar las páginas de Nico sin redirigir APIs ni envíos POST."""
+    if (request.host.split(":", 1)[0].lower() == "fotospantalla.nicovasquezdjs.com"
+            and request.method in {"GET", "HEAD"}
+            and request.path in {"/", "/loop", "/saludos", "/admin"}):
+        destino = "https://fotospantalla.nicovasquez.com.ar" + request.full_path
+        return redirect(destino.rstrip("?") if not request.query_string else destino, code=301)
+
+
 EVENT_NAME = os.environ.get("EVENT_NAME", "Compartí tus fotos")
 
 # ---- Marca ----
