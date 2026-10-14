@@ -73,7 +73,7 @@ class Gallery:
         if not access:abort(404)
         key=os.environ.get('ABROLISTA_EVENT_SOURCE_TOKEN','')
         if not key:abort(503)
-        req=urllib.request.Request('https://abrolista.com/api/eventphotos/album',data=json.dumps({'slug':slug,'access':access}).encode(),headers={'X-EventPhotos-Key':key,'Content-Type':'application/json'},method='POST')
+        req=urllib.request.Request('https://abrolista.com/api/eventphotos/album',data=json.dumps({'slug':slug,'access':access}).encode(),headers={'X-EventPhotos-Key':key,'Content-Type':'application/json','User-Agent':'Abrolista-EventPhotos/1.0'},method='POST')
         try:
             with urllib.request.urlopen(req,timeout=12) as response:result=json.loads(response.read(65536))
         except urllib.error.HTTPError as error:abort(404 if error.code in (403,404) else 503)

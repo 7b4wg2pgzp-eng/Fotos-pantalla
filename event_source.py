@@ -22,7 +22,7 @@ class EventSource:
         token = os.environ.get('ABROLISTA_EVENT_SOURCE_TOKEN','')
         if urlparse(url).scheme != 'https' or urlparse(url).netloc != 'abrolista.com' or not token:
             raise RuntimeError('Falta configurar la conexión privada con Abrolista.')
-        req=urllib.request.Request(url,headers={'X-EventPhotos-Key':token,'Accept':'application/json'})
+        req=urllib.request.Request(url,headers={'X-EventPhotos-Key':token,'Accept':'application/json','User-Agent':'Abrolista-EventPhotos/1.0'})
         with urllib.request.urlopen(req,timeout=12) as response:
             data=json.loads(response.read(131072))
         if not data.get('ok') or not isinstance(data.get('events'),list):
