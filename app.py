@@ -14,8 +14,11 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
+from delivery import Delivery, parse_date
+from event_source import EventSource
+from gallery import Gallery, register_gallery
 
-from flask import Flask, request, jsonify, render_template, send_from_directory, abort, redirect
+from flask import Flask, g, request, jsonify, render_template, send_from_directory, abort, redirect
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageOps
 
@@ -160,6 +163,27 @@ def get_subfolder(nombre: str):
             return GDRIVE_FOLDER_ID
 
 
+_delivery = Delivery(_drive_service, GDRIVE_FOLDER_ID,
+                     lambda: get_subfolder("Datos"),
+                     "entrega-" + (os.environ.get("RENDER_SERVICE_ID") or "local") + ".json")
+
+
+_gallery = Gallery(_delivery, os.environ.get("GALLERY_LINK_SECRET", ""))
+_delivery.gallery = _gallery
+register_gallery(app, _gallery)
+
+
+def _update_delivery(kind, value):
+    try:
+        if kind == "photo":
+            _delivery.on_photo(value)
+        else:
+            _delivery.on_messages(value)
+    except Exception:
+        _delivery.last_error = "Hay archivos pendientes de copiar. Verificá Drive y completá la entrega."
+        print("[entrega] copia pendiente; original conservado.")
+
+
 def _drive_find_id(name: str, parent_id=None):
     """Devuelve el id del archivo con ese nombre en la carpeta indicada."""
     if not _drive_service:
@@ -221,7 +245,8 @@ def save_original(name: str, data: bytes) -> None:
                 metadata["parents"] = [destino]
             mimetype = mimetypes.guess_type(name)[0] or "application/octet-stream"
             media = MediaIoBaseUpload(io.BytesIO(data), mimetype=mimetype, resumable=False)
-            _drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
+            original = _drive_service.files().create(body=metadata, media_body=media, fields="id").execute()
+            _update_delivery("photo", original["id"])
             return
         except Exception:
             import traceback
@@ -230,6 +255,9 @@ def save_original(name: str, data: bytes) -> None:
 
     with open(PHOTOS_DIR / name, "wb") as f:
         f.write(data)
+    # El original local es recuperable, pero Render Free no garantiza su persistencia.
+    # No confirmar una carga como exitosa si el respaldo en Drive falló.
+    raise RuntimeError("No se pudo respaldar el original en Drive.")
 
 
 CACHE_DIR = Path(os.environ.get("EVENTPHOTOS_CACHE", "/tmp/eventphotos_cache"))
@@ -273,9 +301,14 @@ def _write_messages(mensajes) -> None:
         drive_upsert("mensajes.json",
                      json.dumps(mensajes, ensure_ascii=False).encode("utf-8"),
                      get_subfolder("Datos"))
+        _update_delivery("messages", mensajes)
+        stored = _drive_find_id("mensajes.json", get_subfolder("Datos"))
+        if not stored or drive_download(stored) != json.dumps(mensajes, ensure_ascii=False).encode("utf-8"):
+            raise RuntimeError("No se pudo verificar el respaldo de los saludos.")
     except Exception:
         import traceback
         traceback.print_exc()
+        raise
 
 
 def save_message(nombre: str, texto: str) -> Optional[dict]:
@@ -356,17 +389,17 @@ def save_upload(file_storage) -> Optional[str]:
 
 @app.route("/")
 def upload_page():
-    return render_template("upload.html", event_name=EVENT_NAME, marca=MARCA)
+    return render_template("upload.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME), marca=MARCA)
 
 
 @app.route("/loop")
 def loop_page():
-    return render_template("loop.html", event_name=EVENT_NAME, marca=MARCA)
+    return render_template("loop.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME), marca=MARCA)
 
 
 @app.route("/saludos")
 def saludos_page():
-    return render_template("saludos.html", event_name=EVENT_NAME, marca=MARCA)
+    return render_template("saludos.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME), marca=MARCA)
 
 
 @app.route("/api/upload", methods=["POST"])
@@ -402,7 +435,7 @@ def api_upload():
 
     if not saved and not mensaje_guardado:
         return jsonify(ok=False, error="No se pudo procesar el envio"), 400
-    return jsonify(ok=True, saved=saved, mensaje=mensaje_guardado)
+    return jsonify(ok=True, saved=saved, mensaje=mensaje_guardado, entrega_pendiente=bool(_delivery.last_error))
 
 
 @app.route("/api/photos")
@@ -511,7 +544,7 @@ def admin_page():
                 return render_template(
                     "admin_estrenar.html", error="Las dos no coinciden."), 400
             _admin_set_key(nueva)
-            return render_template("admin.html", event_name=EVENT_NAME,
+            return render_template("admin.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME),
                                    marca=MARCA, admin_key=nueva)
         return render_template("admin_estrenar.html", error=None)
 
@@ -521,7 +554,24 @@ def admin_page():
         return render_template("admin_login.html", error=intento), (403 if intento else 200)
 
     clave = request.args.get("key") or request.form.get("key") or ADMIN_KEY
-    return render_template("admin.html", event_name=EVENT_NAME, marca=MARCA, admin_key=clave)
+    return render_template("admin.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME), marca=MARCA, admin_key=clave)
+
+
+@app.route("/api/admin/entrega", methods=["GET", "POST"])
+def admin_entrega():
+    if not _check_admin():
+        return jsonify(ok=False), 403
+    try:
+        agenda = _event_source.status()
+        if request.method == "POST":
+            config = _event_source.ensure(load_messages())
+            if config:
+                _delivery.reconcile(load_messages())
+        state = _delivery.status()
+        gallery_url = _gallery.link(state["config"]) if state.get("config") else None
+        return jsonify(ok=True, agenda=agenda, gallery_url=gallery_url, **state)
+    except Exception:
+        return jsonify(ok=False, error="No se pudo verificar Abrolista o Drive. No se limpiaron los archivos; revisá las conexiones antes del evento."), 503
 
 
 @app.route("/api/admin/borrar-foto", methods=["POST"])
@@ -619,7 +669,72 @@ def _restore_from_drive():
         traceback.print_exc()
 
 
-threading.Thread(target=_restore_from_drive, daemon=True).start()
+_event_lock = threading.RLock()
+
+
+def _reset_event_runtime(config, previous):
+    # Sólo las carpetas técnicas; nunca Originales, Entregas ni las claves del administrador.
+    for name in ("Previews", "Datos"):
+        folder = _delivery.find_folder(GDRIVE_FOLDER_ID, name)
+        if not folder:
+            continue
+        for file in _delivery.list_files(folder["id"]):
+            eligible = name == "Previews" and file["name"].startswith("preview-")
+            eligible = eligible or (name == "Datos" and file["name"] == "mensajes.json")
+            if eligible:
+                if name == "Previews" and parse_date(file["createdTime"]) >= parse_date(config["start"]):
+                    continue
+                # Papelera de Drive: recuperable; el original y la entrega siguen guardados.
+                _drive_service.files().update(fileId=file["id"], body={"trashed": True}, fields="id").execute()
+    for file in CACHE_DIR.glob("*.jpg"):
+        if file.stat().st_mtime < parse_date(config["start"]).timestamp():
+            file.unlink()
+    if MESSAGES_FILE.exists():
+        remaining = [m for m in load_messages() if m.get("ts", 0) >= parse_date(config["start"]).timestamp()]
+        # Escribir directo para no actualizar la entrega de la fiesta anterior.
+        MESSAGES_FILE.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
+
+
+_event_source = EventSource(_delivery, _reset_event_runtime)
+
+
+@app.before_request
+def isolate_eventphotos_event():
+    if request.path not in {"/api/upload", "/api/photos", "/api/mensajes", "/", "/loop", "/saludos"}:
+        return None
+    _event_lock.acquire()
+    g.eventphotos_lock = True
+    try:
+        with _event_lock:
+            config = _event_source.ensure(load_messages())
+            if not config:
+                if request.path == "/api/upload":
+                    return jsonify(ok=False, error="Todavía no hay un evento de Abrolista en curso."), 409
+                if request.path == "/api/photos":
+                    return jsonify(photos=[])
+                if request.path == "/api/mensajes":
+                    return jsonify(mensajes=[])
+            else:
+                # El título se obtiene de Abrolista, sin editar variables de Render por evento.
+                app.config["CURRENT_EVENT_NAME"] = config["name"]
+    except Exception:
+        if request.path.startswith("/api/"):
+            return jsonify(ok=False, error="No se pudo verificar el evento y su respaldo. Volvé a intentar."), 503
+
+
+@app.teardown_request
+def release_eventphotos_lock(error):
+    if getattr(g, "eventphotos_lock", False):
+        g.eventphotos_lock = False
+        _event_lock.release()
+
+
+def _restore_serialized():
+    with _event_lock:
+        _restore_from_drive()
+
+
+threading.Thread(target=_restore_serialized, daemon=True).start()
 
 
 if __name__ == "__main__":
@@ -628,4 +743,5 @@ if __name__ == "__main__":
     print(f"Loop fotos (OBS):   http://0.0.0.0:{PORT}/loop")
     print(f"Saludos (VJ):       http://0.0.0.0:{PORT}/saludos")
     app.run(host="0.0.0.0", port=PORT, debug=False)
+
 

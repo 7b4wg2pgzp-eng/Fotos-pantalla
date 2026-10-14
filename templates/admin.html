@@ -22,9 +22,23 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 #lightbox button{border:none;border-radius:10px;padding:12px 20px;font-size:15px;cursor:pointer;}
 #btnBorrar{background:rgba(220,30,60,.95);color:#fff;}
 #btnCerrar{background:rgba(255,255,255,.12);color:#F5F0FA;}
+.delivery{max-width:820px;margin:8px auto 28px;padding:24px;border:1px solid #e8c46844;border-radius:20px;background:linear-gradient(135deg,#251b33,#181321)}
+.delivery h1{font-size:24px;margin:4px 0 12px;letter-spacing:-.5px}.delivery p{color:#c9bfd3;line-height:1.55;font-size:14px}.delivery .eyebrow{color:#E8C468;font-size:11px;letter-spacing:1.5px;text-transform:uppercase}.delivery label{display:block;font-size:13px;margin:14px 0 6px}.delivery input{box-sizing:border-box;width:100%;padding:12px;border:1px solid #ffffff25;background:#100c18;color:#fff;border-radius:10px;font:inherit}.delivery .dates{display:grid;grid-template-columns:1fr 1fr;gap:14px}.delivery button,.delivery a{display:inline-block;border:none;border-radius:10px;padding:12px 16px;font:inherit;font-size:14px;cursor:pointer;text-decoration:none}.delivery button.primary{background:#E8C468;color:#211727;font-weight:650}.delivery button.secondary{background:#ffffff10;color:#f5f0fa}.delivery button:disabled{opacity:.45;cursor:wait}.delivery .actions{display:flex;flex-wrap:wrap;gap:10px;margin-top:20px}.delivery .status{padding:14px;background:#ffffff06;border-radius:10px;margin:18px 0 0;font-size:14px;line-height:1.5}.delivery a[hidden]{display:none}.delivery a{color:#E8C468;border:1px solid #E8C46855;margin-top:12px}.delivery .path{font-family:ui-monospace,monospace;font-size:12px;color:#E8C468;overflow-wrap:anywhere}.delivery input:focus-visible,.delivery button:focus-visible,.delivery a:focus-visible{outline:2px solid #E8C468;outline-offset:3px} @media(max-width:550px){.delivery{padding:18px}.delivery .dates{grid-template-columns:1fr}}
 </style>
 </head>
 <body>
+<section class="delivery" aria-labelledby="entrega-title">
+<div class="eyebrow">Entrega del evento</div>
+<h1 id="entrega-title">Fotos listas para compartir</h1>
+<p>El nombre y la fecha vienen de Abrolista. Cada foto recibida durante la fiesta tendrá una copia en su carpeta de entrega. Los saludos se guardarán en un archivo de texto. Al terminar la fiesta, compartí esa carpeta con la familia.</p>
+<div class="dates"><div><label>Fiesta detectada en Abrolista</label><p id="eventName" style="font-size:20px;color:#fff">15 Vicky herrera</p></div><div><label>Fecha</label><p id="eventDate" style="font-size:20px;color:#fff">17 de octubre de 2026</p></div></div>
+<p id="eventRange">Sábado 17, 12:00 → domingo 18, 12:00 · Mendoza</p>
+<p class="path" id="deliveryPath">EventPhotos / Entregas / 2026-10-17 — 15 Vicky herrera</p>
+<div class="actions"><button class="primary" type="button" id="reconcileDelivery">Comprobar respaldo y entrega</button></div>
+<div class="status" id="deliveryStatus" role="status" aria-live="polite">Consultando el respaldo en Drive…</div>
+<a id="deliveryLink" hidden target="_blank" rel="noopener">Abrir álbum para compartir</a>
+<p>Las fotos para pantalla siguen disponibles durante 12 horas. La entrega conserva sus copias después de ese plazo. Al comenzar una fiesta nueva, se limpia la pantalla y se reinician los saludos. Los originales y las entregas anteriores se conservan. Compartí únicamente la carpeta de esa fiesta desde Drive.</p>
+</section>
 <h2>Fotos en pantalla</h2>
 <div class="grid" id="fotos"></div>
 <h2>Saludos en pantalla</h2>
@@ -40,6 +54,34 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 
 <script>
 const KEY = {{ admin_key|tojson }};
+const deliveryStatus = document.getElementById('deliveryStatus');
+const deliveryLink = document.getElementById('deliveryLink');
+const deliveryButton = document.getElementById('reconcileDelivery');
+function showDelivery(data) {
+  if (!data.ok) { deliveryStatus.textContent = data.error || 'No se pudo verificar Drive.'; return; }
+  const event = data.agenda?.active || data.agenda?.next_event;
+  if (event) {
+    document.getElementById('eventName').textContent = event.name;
+    document.getElementById('eventDate').textContent = new Date(event.start).toLocaleDateString('es-AR',{timeZone:'America/Argentina/Mendoza',day:'numeric',month:'long',year:'numeric'});
+    document.getElementById('eventRange').textContent = 'Desde las 12:00 del día de la fiesta hasta las 12:00 del día siguiente · Mendoza';
+    document.getElementById('deliveryPath').textContent = 'EventPhotos / Entregas / ' + event.date + ' — ' + event.name;
+  }
+  deliveryStatus.textContent = data.error || (data.agenda?.active ? 'En curso · Copias automáticas · ' + data.verified + ' fotos en la entrega.' : event ? 'Programado desde Abrolista. La carpeta se creará al recibir la primera foto o saludo.' : 'Sin fiestas próximas en Abrolista.');
+  const currentFolder = data.config?.source_id === event?.id && (data.gallery_url || data.folder);
+  deliveryLink.hidden = !currentFolder;
+  if (currentFolder) deliveryLink.href = currentFolder;
+}
+async function verifyDelivery() {
+  deliveryButton.disabled = true;
+  deliveryStatus.textContent = 'Comprobando la fiesta, el respaldo y las copias…';
+  const body = new FormData(); body.set('key', KEY);
+  try { const response = await fetch('/api/admin/entrega', {method:'POST',body}); showDelivery(await response.json()); }
+  catch { deliveryStatus.textContent = 'No se pudo conectar. Volvé a intentar; las copias existentes se conservan.'; }
+  finally { deliveryButton.disabled = false; }
+}
+deliveryButton.addEventListener('click', verifyDelivery);
+fetch('/api/admin/entrega?key=' + encodeURIComponent(KEY), {cache:'no-store'}).then(r=>r.json()).then(showDelivery).catch(()=>{deliveryStatus.textContent='No se pudo consultar Drive.';});
+
 const lightbox = document.getElementById('lightbox');
 const lightboxImg = document.getElementById('lightboxImg');
 const btnBorrar = document.getElementById('btnBorrar');
