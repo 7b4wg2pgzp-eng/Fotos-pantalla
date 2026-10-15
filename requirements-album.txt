@@ -1,0 +1,6 @@
+Flask
+Pillow
+pillow-heif
+gunicorn
+google-api-python-client
+google-auth

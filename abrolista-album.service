@@ -1,0 +1,29 @@
+[Unit]
+Description=Abrolista Album - permanent gallery
+After=network-online.target abrolista.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=abrolista-album
+Group=abrolista-album
+WorkingDirectory=/opt/abrolista-album/current
+EnvironmentFile=/etc/abrolista-album.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=HOME=/run/abrolista-album
+RuntimeDirectory=abrolista-album
+RuntimeDirectoryMode=0700
+ExecStart=/opt/abrolista-album/venv/bin/gunicorn --bind 127.0.0.1:8002 --workers 2 --timeout 300 --max-requests 500 --max-requests-jitter 50 album_app:create_app()
+Restart=always
+RestartSec=3
+TimeoutStopSec=310
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+MemoryMax=300M
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
