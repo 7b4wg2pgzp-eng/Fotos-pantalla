@@ -40,6 +40,7 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 <p>Las fotos para pantalla siguen disponibles durante 12 horas. La entrega conserva sus copias después de ese plazo. Al comenzar una fiesta nueva, se limpia la pantalla y se reinician los saludos. Los originales y las entregas anteriores se conservan. Compartí únicamente la carpeta de esa fiesta desde Drive.</p>
 </section>
 <h2>Fotos en pantalla</h2>
+<div id="pendingDeletes" role="status" aria-live="polite"></div>
 <div class="grid" id="fotos"></div>
 <h2>Saludos en pantalla</h2>
 <div id="mensajes"></div>
@@ -158,12 +159,44 @@ async function cargar() {
   });
 }
 
+const pendingDeletes = new Set();
+try {
+  for (const nombre of JSON.parse(localStorage.getItem('pendingPhotoDeletes') || '[]')) {
+    if (/^[0-9a-f]{32}\.jpg$/.test(nombre)) pendingDeletes.add(nombre);
+  }
+} catch (error) {}
+function showPendingDeletes() {
+  try { localStorage.setItem('pendingPhotoDeletes', JSON.stringify([...pendingDeletes])); } catch (error) {}
+  const container = document.getElementById('pendingDeletes');
+  container.replaceChildren();
+  for (const nombre of pendingDeletes) {
+    const button = document.createElement('button');
+    button.textContent = 'Reintentar eliminación pendiente';
+    button.onclick = () => borrar('/api/admin/borrar-foto', {nombre});
+    container.appendChild(button);
+  }
+}
+showPendingDeletes();
+
 async function borrar(url, datos) {
   if (!confirm('Borrar definitivamente?')) return;
+  const photo = url === '/api/admin/borrar-foto';
+  if (photo) { pendingDeletes.add(datos.nombre); showPendingDeletes(); }
   const fd = new FormData();
   fd.append('key', KEY);
   for (const k in datos) fd.append(k, datos[k]);
-  await fetch(url, {method:'POST', body: fd});
+  try {
+    const response = await fetch(url, {method:'POST', body: fd});
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      alert(result.error || 'No se completó la eliminación. Volvé a intentar.');
+      return;
+    }
+  } catch (error) {
+    alert('No se pudo confirmar la eliminación. Volvé a intentar.');
+    return;
+  }
+  if (photo) { pendingDeletes.delete(datos.nombre); showPendingDeletes(); }
   cargar();
 }
 
@@ -172,3 +205,4 @@ setInterval(cargar, 10000);
 </script>
 </body>
 </html>
+

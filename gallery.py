@@ -86,7 +86,8 @@ class Gallery:
 
     def photos(self,manifest):
         if not manifest.get('photos_folder'):return []
-        return sorted([f for f in self.delivery.list_files(manifest['photos_folder']) if f['mimeType']!=FOLDER and f.get('appProperties',{}).get('deliveryEvent')==manifest['identity']],key=lambda f:f['name'])
+        vetoes=self.delivery.vetoes()
+        return sorted([f for f in self.delivery.list_files(manifest['photos_folder']) if f['mimeType']!=FOLDER and f.get('appProperties',{}).get('deliveryEvent')==manifest['identity'] and not self.delivery.is_vetoed(f,vetoes)],key=lambda f:f['name'])
 
     def greetings(self,manifest):
         if not manifest.get('event_folder'):return []
@@ -166,3 +167,4 @@ def register_gallery(app,gallery):
         text=manifest['name']+'\n\n'+'\n\n'.join((m.get('nombre') or 'Invitado')+'\n'+m.get('texto','') for m in messages)
         response=Response(text,mimetype='text/plain');response.headers['Content-Disposition']=f'attachment; filename="{slug}-saludos.txt"'
         return protected(response)
+

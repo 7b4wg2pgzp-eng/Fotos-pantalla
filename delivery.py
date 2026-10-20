@@ -1,4 +1,4 @@
-"""Copias de entrega por evento. No mueve, borra ni comparte archivos."""
+"""Copias de entrega y moderación persistente de originales y copias vinculadas."""
 import io
 import json
 import re
@@ -10,6 +10,11 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo('America/Argentina/Mendoza')
 FOLDER = 'application/vnd.google-apps.folder'
 FIELDS = 'id,name,mimeType,createdTime,size,md5Checksum,appProperties,webViewLink'
+
+
+def photo_uid(name):
+    match = re.fullmatch(r'(?:preview-)?([0-9a-f]{32})\.[A-Za-z0-9]+', name)
+    return match.group(1) if match else None
 
 
 def escaped(value):
@@ -51,6 +56,10 @@ class Delivery:
     def list_files(self, parent, extra=''):
         self.require_drive()
         query = f"'{escaped(parent)}' in parents and trashed = false" + (' and ' + extra if extra else '')
+        return self.query_files(query)
+
+    def query_files(self, query):
+        self.require_drive()
         out, token = [], None
         while True:
             result = self.service.files().list(q=query, fields='nextPageToken,files(' + FIELDS + ')', pageSize=100, pageToken=token).execute()
@@ -58,6 +67,68 @@ class Delivery:
             token = result.get('nextPageToken')
             if not token:
                 return out
+
+    def vetoes(self):
+        # Compartido entre pantalla y álbum permanente, sin caché por proceso.
+        rows = self.list_files(self.data_folder(), "name contains 'moderation-'")
+        out = {}
+        for row in rows:
+            match = re.fullmatch(r'moderation-([0-9a-f]{32})\.json', row['name'])
+            if not match:
+                continue
+            data = json.loads(self.service.files().get_media(fileId=row['id']).execute())
+            if (data.get('uid') != match.group(1) or not isinstance(data.get('source_ids'), list)
+                    or any(not isinstance(s, str) or not s for s in data['source_ids'])):
+                raise RuntimeError('Veto de moderación inválido.')
+            out.setdefault(data['uid'], set()).update(data['source_ids'])
+        return out
+
+    def is_vetoed(self, source, vetoes=None):
+        vetoes = self.vetoes() if vetoes is None else vetoes
+        source_id = source.get('appProperties', {}).get('sourceFileId') or source['id']
+        return (photo_uid(source['name']) in vetoes
+                or any(source_id in ids for ids in vetoes.values()))
+
+    def save_veto(self, uid, source_ids):
+        if not re.fullmatch(r'[0-9a-f]{32}', uid):
+            raise ValueError('Identificador de foto inválido.')
+        raw = json.dumps(dict(uid=uid, source_ids=sorted(source_ids)), sort_keys=True).encode()
+        saved = self.write(self.data_folder(), 'moderation-' + uid + '.json', raw, 'application/json')
+        if self.service.files().get_media(fileId=saved['id']).execute() != raw:
+            raise RuntimeError('No se pudo verificar el veto persistente.')
+
+    def moderate_photo(self, uid):
+        """Persistir antes de borrar; reintentar con los IDs aunque el original ya no exista."""
+        with self.lock:
+            vetoes = self.vetoes()
+            source_ids = set(vetoes.get(uid, set()))
+            self.save_veto(uid, source_ids)
+            originals = self.find_folder(self.root, 'Originales')
+            sources = self.list_files(originals['id']) if originals else []
+            sources = [s for s in sources if s['mimeType'] != FOLDER and photo_uid(s['name']) == uid]
+            source_ids.update(s['id'] for s in sources)
+            # Los IDs se guardan antes de cualquier eliminación irreversible.
+            self.save_veto(uid, source_ids)
+            targets = {s: s for s in source_ids}
+            for source_id in source_ids:
+                marker = f"appProperties has {{ key='sourceFileId' and value='{escaped(source_id)}' }}"
+                for copy in self.query_files('trashed = false and ' + marker):
+                    targets[copy['id']] = copy['id']
+            previews = self.find_folder(self.root, 'Previews')
+            if previews:
+                for preview in self.list_files(previews['id'], f"name = 'preview-{uid}.jpg'"):
+                    targets[preview['id']] = preview['id']
+            failures = []
+            for file_id in targets:
+                try:
+                    self.service.files().delete(fileId=file_id).execute()
+                except Exception as error:
+                    # Drive DELETE de un ID ya eliminado: reintento idempotente.
+                    if getattr(getattr(error, 'resp', None), 'status', None) != 404:
+                        failures.append(file_id)
+            if failures:
+                raise RuntimeError('Hay archivos pendientes de eliminar en Drive. Volvé a intentar.')
+            return dict(deleted=len(targets), veto_persisted=True)
 
     def find_folder(self, parent, name, create=False):
         matches = self.list_files(parent, f"mimeType = '{FOLDER}' and name = '{escaped(name)}'")
@@ -127,6 +198,8 @@ class Delivery:
 
     def copy_photo(self, source, config):
         self.require_drive()
+        if self.is_vetoed(source):
+            return None
         if source['mimeType'] == FOLDER or not source.get('md5Checksum'):
             raise RuntimeError('El original no permite verificar su integridad.')
         event, photos = self.folders(config, True)
@@ -145,10 +218,16 @@ class Delivery:
             copied = self.service.files().copy(fileId=source['id'], body=dict(name=name, parents=[photos['id']], appProperties=dict(sourceFileId=source['id'], deliveryEvent=config['identity'])), fields=FIELDS).execute()
         if copied.get('md5Checksum') != source['md5Checksum'] or copied.get('size') != source.get('size'):
             raise RuntimeError('La copia no coincide con el original; entrega pendiente.')
+        # Una moderación desde otro proceso puede coincidir con la copia.
+        if self.is_vetoed(source):
+            self.service.files().delete(fileId=copied['id']).execute()
+            return None
         return event, copied
 
     def on_photo(self, source_id):
         with self.lock:
+            if any(source_id in ids for ids in self.vetoes().values()):
+                return
             config = self.load_config()
             if not config or not config['enabled']:
                 return
@@ -182,13 +261,16 @@ class Delivery:
             if not originals:
                 return dict(verified=0, folder=None)
             sources = self.list_files(originals['id'])
-            selected = [s for s in sources if s['mimeType'] != FOLDER and self.accepts(parse_date(s['createdTime']).timestamp(), config)]
+            vetoes = self.vetoes()
+            selected = [s for s in sources if s['mimeType'] != FOLDER and not self.is_vetoed(s, vetoes) and self.accepts(parse_date(s['createdTime']).timestamp(), config)]
+            verified = 0
             for source in selected:
-                self.copy_photo(source, config)
+                if self.copy_photo(source, config):
+                    verified += 1
             self.on_messages(messages)
             event, _ = self.folders(config)
             self.last_error = None
-            return dict(verified=len(selected), folder=event.get('webViewLink') if event else None)
+            return dict(verified=verified, folder=event.get('webViewLink') if event else None)
 
     def status(self):
         with self.lock:
@@ -196,5 +278,7 @@ class Delivery:
             if not config:
                 return dict(config=None, verified=0, folder=None, error=self.last_error)
             event, photos = self.folders(config)
-            count = len(self.list_files(photos['id'])) if photos else 0
+            vetoes = self.vetoes()
+            count = sum(not self.is_vetoed(photo, vetoes) for photo in self.list_files(photos['id'])) if photos else 0
             return dict(config=config, verified=count, folder=event.get('webViewLink') if event else None, error=self.last_error)
+
