@@ -6,6 +6,8 @@ Implementación propuesta en `fix/moderacion-album-originales`, sobre la correcc
 
 La cuadrícula y el visor usan JPEG optimizado y progresivo, de hasta 512 píxeles y calidad 78. JPEG permite reutilizar Pillow sin incorporar codecs ni dependencias de producción adicionales. La descarga individual y el ZIP siguen leyendo los archivos completos, sin conversión ni compresión adicional.
 
+CSS y JavaScript llevan una versión en su URL para evitar reutilizar el cargador anterior después de publicar la optimización. El proxy del servidor debe permitir `album_loader.js`, las rutas `miniatura/<id>` y `estado`, manteniendo las restricciones del resto de rutas.
+
 Cada miniatura se guarda en `Entregas/<evento>/Miniaturas`, fuera de `Fotos originales`: así no altera los conteos de entrega ni se confunde con una copia durante la reconciliación. El nombre identifica la versión del generador, el ID de la foto y su checksum. Una visita posterior o un reinicio reutiliza ese archivo en Drive. Se genera únicamente lo solicitado, sin procesar todo un álbum durante una visita.
 
 Las miniaturas incluyen `appProperties.sourceFileId`, igual que las copias familiares. El moderador existente encuentra y elimina también estos archivos sin modificar `app.py`, `delivery.py` ni el panel. La carpeta técnica no aparece en el álbum ni entra en el ZIP.

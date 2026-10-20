@@ -258,6 +258,8 @@ class AlbumThumbnailTests(unittest.TestCase):
         self.assertIn(b'fetchpriority="high"', response.data)
         self.assertIn(b'decoding="async"', response.data)
         self.assertIn(b'album_loader.js', response.data)
+        for asset in (b'gallery.js', b'gallery.css', b'album_loader.js'):
+            self.assertIn(asset + b'?v=album-512-v1', response.data)
         self.assertIn(b'descargar=1', response.data)
 
     def test_authorization_still_runs_before_cache_or_binary_read(self):
