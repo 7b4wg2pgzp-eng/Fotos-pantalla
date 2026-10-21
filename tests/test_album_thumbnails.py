@@ -15,6 +15,7 @@ from PIL import Image
 from album_media import AlbumMedia, AlbumUnavailable, LimitedWriter, UnsupportedPreview, MAX_SOURCE_BYTES
 from delivery import Delivery
 from gallery import Gallery, register_gallery
+from album_cache import ThumbnailCache
 from test_moderation import FakeDrive, Request, UID
 
 
@@ -259,13 +260,77 @@ class AlbumThumbnailTests(unittest.TestCase):
         self.assertIn(b'decoding="async"', response.data)
         self.assertIn(b'album_loader.js', response.data)
         for asset in (b'gallery.js', b'gallery.css', b'album_loader.js'):
-            self.assertIn(asset + b'?v=album-512-v1', response.data)
+            self.assertIn(asset + b'?v=album-512-v2', response.data)
+        self.assertNotIn(b'Momento 01', response.data)
         self.assertIn(b'descargar=1', response.data)
 
     def test_authorization_still_runs_before_cache_or_binary_read(self):
         with patch.object(self.gallery, 'authorized', side_effect=lambda slug: __import__('flask').abort(404)):
             self.assertEqual(self.client.get(self.url).status_code, 404)
         self.assertEqual(self.drive.calls['media:copy-original'], 0)
+
+    def test_warm_200_uses_one_live_veto_request_and_no_media_read(self):
+        first = self.client.get(self.url)
+        before = self.drive.calls.copy()
+        for _ in range(5):
+            response = self.client.get(self.url)
+            self.assertEqual(response.data, first.data)
+        self.assertEqual(self.drive.calls['list'] - before['list'], 5)
+        self.assertEqual({k:v for k,v in self.drive.calls.items() if k.startswith('media:')},
+                         {k:v for k,v in before.items() if k.startswith('media:')})
+
+    def test_shared_disk_avoids_drive_binary_read_in_second_worker(self):
+        cache = ThumbnailCache(Path(self.temp.name) / 'bytes')
+        self.gallery.media.disk_cache = cache
+        first = self.client.get(self.url)
+        self.gallery.media = AlbumMedia(self.delivery, disk_cache=cache)
+        # Populate only the metadata index (still checks live vetoes).
+        self.gallery.photos(self.manifest)
+        before = self.drive.calls.copy()
+        with patch.object(self.gallery.media, 'render', side_effect=AssertionError('No original read')):
+            second = self.client.get(self.url)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(second.data, first.data)
+        self.assertEqual(self.drive.calls['list'] - before['list'], 1)
+        self.assertEqual({k:v for k,v in self.drive.calls.items() if k.startswith('media:')},
+                         {k:v for k,v in before.items() if k.startswith('media:')})
+
+    def test_disk_bytes_never_override_new_veto_or_drive_error(self):
+        cache = ThumbnailCache(Path(self.temp.name) / 'bytes')
+        self.gallery.media.disk_cache = cache
+        self.client.get(self.url)
+        key = self.gallery.media.key(self.photo)
+        self.assertIsNotNone(cache.read(key))
+        self.drive.fail_read = True
+        self.assertEqual(self.client.get(self.url).status_code, 503)
+        self.drive.fail_read = False
+        self.delivery.save_veto(UID, {'source-original'})
+        self.assertEqual(self.client.get(self.url).status_code, 404)
+        self.assertIsNone(cache.read(key))
+
+    def test_corrupt_local_cache_falls_back_to_verified_drive_thumbnail(self):
+        cache = ThumbnailCache(Path(self.temp.name) / 'bytes')
+        self.gallery.media.disk_cache = cache
+        first = self.client.get(self.url)
+        key = self.gallery.media.key(self.photo)
+        (cache.directory / key).write_bytes(b'corrupt')
+        self.gallery.media = AlbumMedia(self.delivery, disk_cache=cache)
+        response = self.client.get(self.url)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.data, first.data)
+        self.assertEqual(cache.read(key), first.data)
+
+    def test_disk_cache_bounded_eviction_and_write_failure_are_disposable(self):
+        cache = ThumbnailCache(Path(self.temp.name) / 'bytes')
+        with patch('album_cache.MAX_BYTES', 100):
+            cache.write('a' * 64, b'1' * 60)
+            cache.write('b' * 64, b'2' * 60)
+        self.assertIsNone(cache.read('a' * 64))
+        self.assertEqual(cache.read('b' * 64), b'2' * 60)
+        with patch('album_cache.os.replace', side_effect=OSError('disk full')):
+            cache.write('c' * 64, b'3' * 60)
+        self.assertIsNone(cache.read('c' * 64))
+        self.assertFalse(list(cache.directory.glob('.tmp-*')))
 
     def test_exif_orientation_is_applied_and_original_metadata_is_not_copied(self):
         original = Image.new('RGB', (800, 600), 'red')

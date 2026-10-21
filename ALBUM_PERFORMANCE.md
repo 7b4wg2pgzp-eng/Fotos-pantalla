@@ -64,3 +64,17 @@ Las pruebas usan fotos sintéticas, Drive en memoria, credenciales desactivadas 
 - Antes de producción se requiere autorización y una prueba controlada en el servidor real. No se desplegó ni se eliminaron fotos reales durante esta tarea.
 
 Referencias: [consultas y propiedades de Drive](https://developers.google.com/workspace/drive/api/guides/search-files), [decodificación JPEG de Pillow](https://pillow.readthedocs.io/en/stable/handbook/image-file-formats.html#jpeg), [revalidación HTTP](https://developer.mozilla.org/en-US/docs/Web/HTTP/Reference/Headers/Cache-Control).
+
+## Revisión móvil — 2026-10-21 (pendiente de publicación)
+
+La medición del servidor vigente dio una miniatura HTTP 200 en 1,521 s y su revalidación 304 en 0,289 s. Son mediciones puntuales desde el servidor, no una simulación de red móvil. Los bytes ya eran pequeños; había consultas redundantes de moderación y descargas de la misma miniatura por distintos workers.
+
+Esta revisión reutiliza los bytes de memoria inmediatamente después de la comprobación actual de pertenencia y veto de `photos()`. Una respuesta 200 caliente requiere una sola consulta de metadatos de veto, igual que un 304, sin lecturas binarias ni conversión. No se cachea la autorización ni el veto positivo.
+
+Sólo `album_app.py` habilita además una caché de disco compartida entre workers, con escrituras atómicas, checksum local y expulsión por antigüedad a 128 MiB. El segundo worker puede reutilizar la miniatura descargada por el primero. Drive conserva la copia persistente. Disco lleno, permisos o archivo corrupto vuelven a Drive; un fallo de comprobación de veto devuelve 503 aun existiendo bytes locales. Un veto detectado elimina también la entrada local y bloquea memoria y disco de cualquier worker.
+
+No hay variables obligatorias nuevas. Opcional: `ALBUM_THUMBNAIL_CACHE_DIR`, directorio privado y escribible del servicio del álbum. Sin definirlo usa su directorio temporal privado: sobrevive a recargas de workers, pero puede vaciarse al reiniciar el servicio. Para conservarlo entre reinicios completos se debe configurar un directorio persistente permitido por systemd/Render. No es necesario modificar ningún servicio de pantallas de Render. La persistencia durable sigue en Drive incluso si se pierde esta caché.
+
+Se retiraron los rótulos “Momento 01, 02…” de las tarjetas, conservando los nombres accesibles de las fotos y la descarga. CSS y JS pasan a `album-512-v2` para renovar recursos al publicar.
+
+Validación: 47 pruebas Python aprobadas (las 42 anteriores más 5 nuevas), 0 fallos; las dos suites JavaScript aprobadas. Nuevas comprobaciones: una consulta por 200 caliente; segundo worker sin descargas binarias; veto/fallo de Drive bloquean caché de disco; recuperación de entrada corrupta; límite de disco y fallo de escritura. Fotos ficticias y conexiones reales bloqueadas. No se publicó esta revisión ni se modificó configuración de producción. Pendiente medir el resultado real en móvil tras una publicación autorizada.

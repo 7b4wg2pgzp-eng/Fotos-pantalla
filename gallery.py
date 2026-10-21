@@ -161,7 +161,11 @@ def register_gallery(app,gallery):
         if request.if_none_match.contains(etag):
             response=protected(Response(status=304))
         else:
-            try:data=gallery.media.thumbnail(manifest,photo)
+            try:
+                # photos() just checked current Drive veto metadata. Reuse verified bytes
+                # without repeating that network check on the hot path.
+                data=gallery.media.cached_thumbnail(photo)
+                if data is None:data=gallery.media.thumbnail(manifest,photo)
             except (AlbumUnavailable,UnsupportedPreview):raise
             except Exception as error:raise AlbumUnavailable('No se pudo preparar la miniatura.') from error
             if data is None:abort(404)

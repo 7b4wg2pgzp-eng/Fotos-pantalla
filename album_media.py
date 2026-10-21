@@ -39,8 +39,9 @@ class LimitedWriter:
 
 
 class AlbumMedia:
-    def __init__(self, delivery):
+    def __init__(self, delivery, disk_cache=None):
         self.delivery = delivery
+        self.disk_cache = disk_cache
         self.lock = threading.RLock()
         self.generation = threading.BoundedSemaphore(1)
         self.indexes = OrderedDict()
@@ -139,12 +140,40 @@ class AlbumMedia:
             while self.memory_size > MEMORY_BYTES:
                 _, removed = self.memory.popitem(last=False)
                 self.memory_size -= len(removed)
+        if self.disk_cache is not None:
+            self.disk_cache.write(key, data)
+
+    def cached_thumbnail(self, photo):
+        """Bytes only: caller MUST validate current membership and live veto first."""
+        key = self.key(photo)
+        with self.lock:
+            data = self.memory.get(key)
+            if data is not None:
+                self.memory.move_to_end(key)
+                return data
+        if self.disk_cache is not None:
+            data = self.disk_cache.read(key)
+            if data is not None:
+                # Warm the per-worker LRU without rewriting the disk entry.
+                with self.lock:
+                    previous = self.memory.pop(key, None)
+                    if previous is not None:
+                        self.memory_size -= len(previous)
+                    self.memory[key] = data
+                    self.memory_size += len(data)
+                    while self.memory_size > MEMORY_BYTES:
+                        _, removed = self.memory.popitem(last=False)
+                        self.memory_size -= len(removed)
+                return data
+        return None
 
     def forget(self, key):
         with self.lock:
             data = self.memory.pop(key, None)
             if data is not None:
                 self.memory_size -= len(data)
+        if self.disk_cache is not None:
+            self.disk_cache.discard(key)
 
     def thumbnail_folder(self, manifest):
         event_folder = manifest.get('event_folder')
@@ -209,11 +238,9 @@ class AlbumMedia:
         if not self.allowed(photo):
             self.forget(key)
             return None
-        with self.lock:
-            data = self.memory.get(key)
-            if data is not None:
-                self.memory.move_to_end(key)
-                return data
+        data = self.cached_thumbnail(photo)
+        if data is not None:
+            return data
         folder = self.thumbnail_folder(manifest)
         with self.generation, self.process_lock(key):
             # A different worker may have generated it while this worker waited.

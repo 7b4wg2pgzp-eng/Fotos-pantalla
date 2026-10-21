@@ -73,3 +73,6 @@ dialog::backdrop{background:#1c172e80;backdrop-filter:blur(14px)}.viewer-prev,.v
 .site-header{position:sticky;top:14px;z-index:20;background:linear-gradient(135deg,#ffffff78,#ffffff24);backdrop-filter:blur(26px) saturate(155%);-webkit-backdrop-filter:blur(26px) saturate(155%)}
 @media(max-width:700px){.site-header{top:10px}}
 
+
+/* Photo cards keep a single, aligned download action. */
+.photo-caption{justify-content:flex-end}
