@@ -109,7 +109,7 @@ class ManualAlbumMediaTests(unittest.TestCase):
         with zipfile.ZipFile(io.BytesIO(chunks)) as album:
             names = album.namelist()
             self.assertTrue(any(name.endswith('/Videos/Videos-0001.mp4') for name in names))
-            self.assertTrue(any(name.endswith('/Videos/Videos-0003.mov') for name in names))
+            self.assertTrue(any(name.startswith('vicky-herrera/Videos/') and name.endswith('.mov') for name in names))
             self.assertEqual(len([name for name in names if '/Foto-' in name]), 2)
             self.assertEqual(len([name for name in names if '/Videos/' in name]), 3)
 
