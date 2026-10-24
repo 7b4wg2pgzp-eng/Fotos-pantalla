@@ -645,9 +645,11 @@ def _restore_from_drive():
                     continue
                 creado = archivo.get("createdTime", "")
                 try:
-                    ts = time.mktime(time.strptime(creado[:19], "%Y-%m-%dT%H:%M:%S"))
-                except Exception:
-                    ts = time.time()
+                    # Drive devuelve UTC con zona horaria: no interpretarlo como hora local.
+                    ts = parse_date(creado).timestamp()
+                except (ValueError, TypeError, KeyError):
+                    # Sin fecha fiable, no restaurar una foto vieja como si fuera nueva.
+                    continue
                 if ts < corte:
                     continue
                 destino = CACHE_DIR / nombre.replace("preview-", "", 1)
