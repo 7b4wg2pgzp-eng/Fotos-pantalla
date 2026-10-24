@@ -114,8 +114,7 @@ class Gallery:
         folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDERS[section],create=True)
         return self.unique_media([f for f in self.delivery.list_files(folder['id'])
                        if f.get('mimeType') in VIDEO_MIMES and
-                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])],
-                      key=lambda f:f['name'])
+                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
 
     def greetings(self,manifest):
         if not manifest.get('event_folder'):return []
