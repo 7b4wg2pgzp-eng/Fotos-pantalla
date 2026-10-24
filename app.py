@@ -695,7 +695,51 @@ def _reset_event_runtime(config, previous):
         MESSAGES_FILE.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
 
 
-_event_source = EventSource(_delivery, _reset_event_runtime)
+def _close_event_runtime(config):
+    """Retira archivos temporales al finalizar una fiesta ya archivada.
+
+    No toca Originales, Entregas ni los archivos de autor de la galería.
+    Los archivos técnicos se envían a Papelera (recuperables).
+    """
+    cutoff = parse_date(config["end"]).timestamp()
+    previews = _delivery.find_folder(GDRIVE_FOLDER_ID, "Previews")
+    if previews:
+        for item in _delivery.list_files(previews["id"]):
+            if not item["name"].startswith("preview-"):
+                continue
+            # No eliminar fotos de un evento posterior.
+            if parse_date(item["createdTime"]).timestamp() < cutoff:
+                _drive_service.files().update(
+                    fileId=item["id"], body={"trashed": True}, fields="id"
+                ).execute()
+
+    # Los saludos del evento fueron copiados a Entregas antes de llamar aquí.
+    remaining = [m for m in load_messages() if float(m.get("ts", 0)) >= cutoff]
+    data_folder = _delivery.find_folder(GDRIVE_FOLDER_ID, "Datos")
+    if data_folder:
+        existing = _delivery.list_files(data_folder["id"], "name = 'mensajes.json'")
+        if len(existing) > 1:
+            raise RuntimeError("Hay más de un archivo de saludos temporales.")
+        if remaining:
+            payload = json.dumps(remaining, ensure_ascii=False).encode("utf-8")
+            saved = _delivery.write(data_folder["id"], "mensajes.json", payload, "application/json")
+            if _drive_service.files().get_media(fileId=saved["id"]).execute() != payload:
+                raise RuntimeError("No se pudo confirmar la limpieza de saludos.")
+        else:
+            for item in existing:
+                _drive_service.files().update(
+                    fileId=item["id"], body={"trashed": True}, fields="id"
+                ).execute()
+
+    # Limpiar caché solo después de completar las operaciones en Drive.
+    for item in CACHE_DIR.glob("*.jpg"):
+        if item.stat().st_mtime < cutoff:
+            item.unlink()
+    MESSAGES_FILE.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
+    print("[evento] cerrada entrega anterior; previews y saludos temporales depurados.")
+
+
+_event_source = EventSource(_delivery, _reset_event_runtime, close_runtime=_close_event_runtime)
 
 
 @app.before_request
