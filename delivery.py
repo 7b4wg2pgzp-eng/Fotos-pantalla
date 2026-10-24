@@ -33,6 +33,7 @@ def validate_config(data):
     identity = hashlib.sha256((name + start.isoformat() + end.isoformat()).encode()).hexdigest()[:20]
     return dict(name=name, start=start.isoformat(), end=end.isoformat(), enabled=bool(data.get('enabled')), identity=identity,
                 source_id=str(data.get("source_id", "")), album_slug=str(data.get("album_slug", "")), reset_pending=bool(data.get("reset_pending",False)),
+                closed=bool(data.get("closed",False)), close_pending=bool(data.get("close_pending",False)),
                 folder_name=start.astimezone(TZ).strftime('%Y-%m-%d') + ' — ' + name)
 
 
