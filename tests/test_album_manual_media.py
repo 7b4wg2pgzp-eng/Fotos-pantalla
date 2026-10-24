@@ -40,14 +40,16 @@ class ManualAlbumMediaTests(unittest.TestCase):
                 dict(id='other-photo', name='ajena.jpg', mimeType='image/jpeg',
                      appProperties={'deliveryEvent': 'abrolista:999'}),
                 dict(id='not-photo', name='archivo.html', mimeType='text/html')],
-            'reels-4': [dict(id='reel-1', name='reel.mp4',
-                             mimeType='video/mp4', size='10')],
-            'stories-4': [dict(id='story-1', name='historia.mov',
-                               mimeType='video/quicktime', size='10')]}
+            'videos-4': [dict(id='reel-1', name='reel.mp4',
+                              mimeType='video/mp4', size='10'),
+                         dict(id='story-1', name='historia.mov',
+                              mimeType='video/quicktime', size='10'),
+                         dict(id='resumen-1', name='Resumen fiesta.mp4',
+                              mimeType='video/mp4', size='10')]}
         self.gallery.delivery.list_files = lambda folder, extra='': (
             [] if extra else self.media.get(folder, []))
         self.gallery.delivery.find_folder = lambda parent, name, create=False: (
-            {'id': {'Reels': 'reels-4', 'Historias': 'stories-4'}[name]}
+            {'id': {'Videos': 'videos-4'}[name]}
             if parent == 'event-4' else None)
         self.gallery.greetings = lambda manifest: []
 
@@ -55,15 +57,23 @@ class ManualAlbumMediaTests(unittest.TestCase):
         response = self.client.get('/vicky-herrera' + self.query)
         self.assertEqual(response.status_code, 200)
         html = response.get_data(as_text=True)
-        self.assertIn('Reels', html)
-        self.assertIn('Historias', html)
+        self.assertIn('Videos de la fiesta', html)
+        self.assertIn('Resumen fiesta', html)
         self.assertIn('/video/reel-1?', html)
         self.assertIn('/video/story-1?', html)
+        self.assertIn('/video/resumen-1?', html)
         self.assertIn('/foto/manual-photo?', html)
         self.assertIn('/foto/delivery-photo?', html)
         self.assertNotIn('other-photo', html)
         self.assertNotIn('archivo.html', html)
         self.assertIn('Descargar original', html)
+
+    def test_manual_duplicate_checksum_is_not_repeated(self):
+        self.media['videos-4'].append(dict(id='dupe', name='same.mp4',
+                                           mimeType='video/mp4', size='10',
+                                           md5Checksum='identical'))
+        self.media['videos-4'][0]['md5Checksum']='identical'
+        self.assertEqual(len(self.gallery.videos(self.manifest)),3)
 
     def test_video_access_cannot_bypass_the_album_token(self):
         self.assertEqual(self.client.get('/album/vicky-herrera/video/reel-1').status_code, 404)
@@ -95,13 +105,13 @@ class ManualAlbumMediaTests(unittest.TestCase):
         self.gallery.download_chunks = lambda file_id: iter([('DATA-' + file_id).encode()])
         chunks = b''.join(self.gallery.zip_chunks(
             self.manifest, self.gallery.photos(self.manifest),
-            [('Reels', self.gallery.videos(self.manifest, 'reels')),
-             ('Historias', self.gallery.videos(self.manifest, 'stories'))]))
+            [('Videos', self.gallery.videos(self.manifest))]))
         with zipfile.ZipFile(io.BytesIO(chunks)) as album:
             names = album.namelist()
-            self.assertTrue(any(name.endswith('/Reels/Reels-0001.mp4') for name in names))
-            self.assertTrue(any(name.endswith('/Historias/Historias-0001.mov') for name in names))
+            self.assertTrue(any(name.endswith('/Videos/Videos-0001.mp4') for name in names))
+            self.assertTrue(any(name.endswith('/Videos/Videos-0003.mov') for name in names))
             self.assertEqual(len([name for name in names if '/Foto-' in name]), 2)
+            self.assertEqual(len([name for name in names if '/Videos/' in name]), 3)
 
 
 if __name__ == '__main__':
