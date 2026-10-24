@@ -10,7 +10,7 @@ from delivery import parse_date,TZ,FOLDER
 MONTHS=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre']
 IMAGE_MIMES={'image/jpeg','image/png','image/webp','image/heic','image/heif','image/gif','image/tiff','image/bmp'}
 VIDEO_MIMES={'video/mp4','video/quicktime','video/webm','video/x-m4v'}
-VIDEO_FOLDERS={'reels':'Reels','stories':'Historias'}
+VIDEO_FOLDER='Videos'
 
 class ChunkWriter:
     def __init__(self):self.position=0;self.queue=deque()
@@ -107,11 +107,11 @@ class Gallery:
                        if f.get('mimeType') in IMAGE_MIMES and
                        f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
 
-    def videos(self,manifest,section):
-        if section not in VIDEO_FOLDERS:raise ValueError('Sección de videos no válida.')
+    def videos(self,manifest):
         if not manifest.get('event_folder'):return []
-        # Crear automáticamente las carpetas también en entregas anteriores.
-        folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDERS[section],create=True)
+        # Carpeta única para reels, historias, videos editados y resúmenes completos.
+        # Se crea automáticamente al abrir un álbum autorizado, también si es antiguo.
+        folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDER,create=True)
         return self.unique_media([f for f in self.delivery.list_files(folder['id'])
                        if f.get('mimeType') in VIDEO_MIMES and
                        f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
@@ -186,13 +186,12 @@ def register_gallery(app,gallery):
         manifest=gallery.authorized(slug);token=gallery.token(manifest);query=urlencode({'acceso':token})
         date=datetime.fromisoformat(manifest['date']) if manifest.get('date') else None;event=dict(manifest,kind='Fiesta de 15' if re.match(r'^(15|XV)\s',manifest['name'],re.I) else 'Álbum del evento',display_date=f'{date.day} de {MONTHS[date.month-1]} de {date.year}' if date else 'Fecha por confirmar')
         photos=[dict(id=p['id'],preview_url=f'/album/{slug}/foto/{p["id"]}?{query}',download_url=f'/album/{slug}/foto/{p["id"]}?{query}&descargar=1') for p in gallery.photos(manifest)]
-        def video_links(section):
-            return [dict(id=v['id'],play_url=f'/album/{slug}/video/{v["id"]}?{query}',
-                         download_url=f'/album/{slug}/video/{v["id"]}?{query}&descargar=1',
-                         mime=v['mimeType'])
-                    for v in gallery.videos(manifest,section)]
-        reels,stories=video_links('reels'),video_links('stories')
-        html=render_template('gallery.html',event=event,photos=photos,reels=reels,stories=stories,
+        videos=[dict(id=v['id'],play_url=f'/album/{slug}/video/{v["id"]}?{query}',
+                     download_url=f'/album/{slug}/video/{v["id"]}?{query}&descargar=1',
+                     mime=v['mimeType'],
+                     title=v['name'].rsplit('.',1)[0].replace('_',' ').replace('-',' ').strip())
+                for v in gallery.videos(manifest)]
+        html=render_template('gallery.html',event=event,photos=photos,videos=videos,
                              greetings=gallery.greetings(manifest),zip_url=f'/album/{slug}/descargar?{query}',
                              greetings_url=f'/album/{slug}/saludos?{query}',preview=False)
         return protected(Response(html,mimetype='text/html'))
@@ -217,7 +216,7 @@ def register_gallery(app,gallery):
     @app.get('/album/<slug>/video/<file_id>')
     def gallery_video(slug,file_id):
         manifest=gallery.authorized(slug)
-        videos=gallery.videos(manifest,'reels')+gallery.videos(manifest,'stories')
+        videos=gallery.videos(manifest)
         matches=[v for v in videos if v['id']==file_id]
         if len(matches)!=1:abort(404)
         video=matches[0]
@@ -252,7 +251,7 @@ def register_gallery(app,gallery):
     @app.get('/album/<slug>/descargar')
     def gallery_download(slug):
         manifest=gallery.authorized(slug);photos=gallery.photos(manifest)
-        groups=[('Reels',gallery.videos(manifest,'reels')),('Historias',gallery.videos(manifest,'stories'))]
+        groups=[('Videos',gallery.videos(manifest))]
         response=Response(stream_with_context(gallery.zip_chunks(manifest,photos,groups)),mimetype='application/zip')
         response.headers['Content-Disposition']=f'attachment; filename="{slug}-album.zip"'
         return protected(response)
