@@ -1,6 +1,17 @@
 name: Album delivery tests
 
 on:
+  push:
+    branches: [main]
+    paths:
+      - "gallery.py"
+      - "delivery.py"
+      - "album_app.py"
+      - "templates/gallery.html"
+      - "static/gallery.css"
+      - "tests/test_album_*.py"
+      - "ops/deploy_album.sh"
+      - ".github/workflows/album-tests.yml"
   pull_request:
     paths:
       - "gallery.py"
@@ -10,6 +21,7 @@ on:
       - "static/gallery.css"
       - "tests/test_album_*.py"
       - "requirements-album.txt"
+      - "ops/deploy_album.sh"
       - ".github/workflows/album-tests.yml"
 
 jobs:
@@ -22,6 +34,8 @@ jobs:
           python-version: "3.11"
       - name: Install album requirements
         run: python -m pip install -r requirements-album.txt
+      - name: Validate VPS deployment script
+        run: bash -n ops/deploy_album.sh
       - name: Compile Python modules
         run: python -m compileall -q gallery.py delivery.py album_app.py
       - name: Test album routes and media
