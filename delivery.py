@@ -184,6 +184,9 @@ class Delivery:
                 raise ValueError('Primero activá la entrega de un evento.')
             originals = self.find_folder(self.root, 'Originales')
             if not originals:
+                # Puede haber saludos aunque nadie haya compartido una foto.
+                self.on_messages(messages)
+                self.last_error = None
                 return dict(verified=0, folder=None)
             sources = self.list_files(originals['id'])
             selected = [s for s in sources if s['mimeType'] != FOLDER and self.accepts(parse_date(s['createdTime']).timestamp(), config)]
