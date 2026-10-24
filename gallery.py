@@ -87,21 +87,32 @@ class Gallery:
         if not result.get('ok'):abort(404)
         return result['event']
 
+    @staticmethod
+    def unique_media(items):
+        # Mantener una sola copia si el mismo archivo se sube varias veces.
+        seen=set()
+        result=[]
+        for item in sorted(items,key=lambda f:f['name']):
+            identity=item.get('md5Checksum') or item['id']
+            if identity not in seen:
+                seen.add(identity)
+                result.append(item)
+        return result
+
     def photos(self,manifest):
         if not manifest.get('photos_folder'):return []
         # Incluye las copias automáticas y las imágenes agregadas manualmente a la
         # carpeta de esta entrega. Nunca incorpora archivos marcados para otro evento.
-        return sorted([f for f in self.delivery.list_files(manifest['photos_folder'])
+        return self.unique_media([f for f in self.delivery.list_files(manifest['photos_folder'])
                        if f.get('mimeType') in IMAGE_MIMES and
-                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])],
-                      key=lambda f:f['name'])
+                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
 
     def videos(self,manifest,section):
         if section not in VIDEO_FOLDERS:raise ValueError('Sección de videos no válida.')
         if not manifest.get('event_folder'):return []
         # Crear automáticamente las carpetas también en entregas anteriores.
         folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDERS[section],create=True)
-        return sorted([f for f in self.delivery.list_files(folder['id'])
+        return self.unique_media([f for f in self.delivery.list_files(folder['id'])
                        if f.get('mimeType') in VIDEO_MIMES and
                        f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])],
                       key=lambda f:f['name'])
