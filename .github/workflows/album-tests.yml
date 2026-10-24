@@ -10,7 +10,11 @@ on:
       - "templates/gallery.html"
       - "static/gallery.css"
       - "tests/test_album_*.py"
+      - "tests/test_event_closure.py"
       - "ops/deploy_album.sh"
+      - "event_source.py"
+      - "app.py"
+      - "tests/test_event_closure.py"
       - ".github/workflows/album-tests.yml"
   pull_request:
     paths:
@@ -37,6 +41,6 @@ jobs:
       - name: Validate VPS deployment script
         run: bash -n ops/deploy_album.sh
       - name: Compile Python modules
-        run: python -m compileall -q gallery.py delivery.py album_app.py
+        run: python -m compileall -q gallery.py delivery.py album_app.py app.py event_source.py
       - name: Test album routes and media
-        run: python -m unittest discover -v -s tests -p 'test_album_*.py'
+        run: python -m unittest discover -v -s tests -p 'test_*.py'
