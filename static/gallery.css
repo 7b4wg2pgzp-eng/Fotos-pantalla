@@ -70,3 +70,21 @@ dialog::backdrop{background:#1c172e80;backdrop-filter:blur(14px)}.viewer-prev,.v
 /* Header floats above the scrolling album. */
 .site-header{position:sticky;top:14px;z-index:20;background:linear-gradient(135deg,#ffffff78,#ffffff24);backdrop-filter:blur(26px) saturate(155%);-webkit-backdrop-filter:blur(26px) saturate(155%)}
 @media(max-width:700px){.site-header{top:10px}}
+
+
+/* Reels e historias cargados directamente desde las carpetas de cada entrega. */
+.video-collection{padding-top:18px}
+.video-grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:20px;align-items:start}
+.video-card{min-width:0;padding:8px;border:1px solid #ffffffdf;border-radius:26px;background:linear-gradient(135deg,#ffffffa3,#ffffff38);backdrop-filter:blur(26px) saturate(145%);-webkit-backdrop-filter:blur(26px) saturate(145%);box-shadow:inset 0 1px 1px #fff,0 12px 36px #4b476c0b}
+.video-card video{display:block;width:100%;aspect-ratio:9/16;max-height:600px;object-fit:contain;background:#181322;border-radius:19px}
+.video-card .photo-caption{display:flex;align-items:center;flex-wrap:wrap;gap:10px}
+.video-card .photo-caption a{color:#8a377e;font-weight:700}
+.video-card .photo-caption a:hover{color:#d81b78}
+@media(max-width:700px){
+  .video-collection{padding-top:4px}
+  .video-grid{grid-template-columns:repeat(2,minmax(0,1fr));gap:14px}
+  .video-card{padding:5px;border-radius:21px}
+  .video-card video{border-radius:16px}
+  .video-card .photo-caption{font-size:10px}
+}
+@media(max-width:410px){.video-grid{grid-template-columns:minmax(0,1fr);max-width:340px;margin:0 auto}}
