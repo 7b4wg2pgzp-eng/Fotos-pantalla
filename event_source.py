@@ -9,8 +9,9 @@ from datetime import datetime, timezone
 from delivery import parse_date, validate_config
 
 class EventSource:
-    def __init__(self, delivery, reset_runtime, fetch=None):
+    def __init__(self, delivery, reset_runtime, fetch=None, close_runtime=None):
         self.delivery, self.reset_runtime = delivery, reset_runtime
+        self.close_runtime = close_runtime
         self.fetch = fetch or self.fetch_remote
         self.lock = threading.RLock()
         self.rows=[]
@@ -48,7 +49,22 @@ class EventSource:
 
     def ensure(self, messages, now=None):
         with self.lock, self.delivery.lock:
+            now = now or datetime.now(timezone.utc)
             event=self.active(now)
+            previous=self.delivery.load_config()
+            # El cierre se procesa en el primer acceso después de que termina el
+            # evento, aunque NO exista otro evento activo. La fase pendiente evita
+            # sobrescribir saludos archivados si una limpieza queda interrumpida.
+            if (previous and previous.get('enabled') and not previous.get('closed')
+                    and parse_date(previous['end']) <= now):
+                if not previous.get('close_pending'):
+                    self.delivery.reconcile(messages)
+                    previous=dict(previous,close_pending=True)
+                    self.delivery.save_config(previous)
+                if self.close_runtime:
+                    self.close_runtime(previous)
+                previous=dict(previous,close_pending=False,closed=True)
+                self.delivery.save_config(previous)
             if not event:
                 return None
             config=validate_config(dict(name=event['name'],start=event['start'],end=event['end'],enabled=True,album_slug=event.get('album_slug','')))
@@ -59,7 +75,7 @@ class EventSource:
                     and previous['start'] == config['start'] and previous['end'] == config['end'])
             if same and not previous.get('reset_pending'):
                 return previous
-            if previous and previous.get('enabled') and not same:
+            if previous and previous.get('enabled') and not same and not previous.get('closed'):
                 self.delivery.reconcile(messages)
                 self.delivery.on_messages(messages)
             # Transición persistente: si falla la limpieza se reanuda sin perder el archivo de saludos anterior.

@@ -1,0 +1,20 @@
+name: Cierre de fiestas - Fotos en Pantalla
+
+# Wake the public read-only endpoint once a day so an expired event is
+# closed even when no one opens the site. It never sends private tokens.
+on:
+  schedule:
+    # 13:20 Mendoza, every day (UTC-3). After the usual 12:00 event cutoff.
+    - cron: "20 16 * * *"
+  workflow_dispatch:
+
+jobs:
+  close-expired-events:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Revisar cierre automático y respaldos
+        run: |
+          curl --fail --silent --show-error --location \
+            --max-time 100 --retry 2 --retry-delay 15 \
+            --output /dev/null \
+            "https://fotospantalla.nicovasquez.com.ar/api/photos"

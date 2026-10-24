@@ -33,6 +33,7 @@ def validate_config(data):
     identity = hashlib.sha256((name + start.isoformat() + end.isoformat()).encode()).hexdigest()[:20]
     return dict(name=name, start=start.isoformat(), end=end.isoformat(), enabled=bool(data.get('enabled')), identity=identity,
                 source_id=str(data.get("source_id", "")), album_slug=str(data.get("album_slug", "")), reset_pending=bool(data.get("reset_pending",False)),
+                closed=bool(data.get("closed",False)), close_pending=bool(data.get("close_pending",False)),
                 folder_name=start.astimezone(TZ).strftime('%Y-%m-%d') + ' — ' + name)
 
 
@@ -183,6 +184,9 @@ class Delivery:
                 raise ValueError('Primero activá la entrega de un evento.')
             originals = self.find_folder(self.root, 'Originales')
             if not originals:
+                # Puede haber saludos aunque nadie haya compartido una foto.
+                self.on_messages(messages)
+                self.last_error = None
                 return dict(verified=0, folder=None)
             sources = self.list_files(originals['id'])
             selected = [s for s in sources if s['mimeType'] != FOLDER and self.accepts(parse_date(s['createdTime']).timestamp(), config)]
