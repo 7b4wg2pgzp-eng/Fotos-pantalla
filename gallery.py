@@ -8,6 +8,9 @@ from PIL import Image,ImageOps
 from delivery import parse_date,TZ,FOLDER
 
 MONTHS=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre']
+IMAGE_MIMES={'image/jpeg','image/png','image/webp','image/heic','image/heif','image/gif','image/tiff','image/bmp'}
+VIDEO_MIMES={'video/mp4','video/quicktime','video/webm','video/x-m4v'}
+VIDEO_FOLDER='Videos'
 
 class ChunkWriter:
     def __init__(self):self.position=0;self.queue=deque()
@@ -84,9 +87,34 @@ class Gallery:
         if not result.get('ok'):abort(404)
         return result['event']
 
+    @staticmethod
+    def unique_media(items):
+        # Mantener una sola copia si el mismo archivo se sube varias veces.
+        seen=set()
+        result=[]
+        for item in sorted(items,key=lambda f:f['name']):
+            identity=item.get('md5Checksum') or item['id']
+            if identity not in seen:
+                seen.add(identity)
+                result.append(item)
+        return result
+
     def photos(self,manifest):
         if not manifest.get('photos_folder'):return []
-        return sorted([f for f in self.delivery.list_files(manifest['photos_folder']) if f['mimeType']!=FOLDER and f.get('appProperties',{}).get('deliveryEvent')==manifest['identity']],key=lambda f:f['name'])
+        # Incluye las copias automáticas y las imágenes agregadas manualmente a la
+        # carpeta de esta entrega. Nunca incorpora archivos marcados para otro evento.
+        return self.unique_media([f for f in self.delivery.list_files(manifest['photos_folder'])
+                       if f.get('mimeType') in IMAGE_MIMES and
+                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
+
+    def videos(self,manifest):
+        if not manifest.get('event_folder'):return []
+        # Carpeta única para reels, historias, videos editados y resúmenes completos.
+        # Se crea automáticamente al abrir un álbum autorizado, también si es antiguo.
+        folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDER,create=True)
+        return self.unique_media([f for f in self.delivery.list_files(folder['id'])
+                       if f.get('mimeType') in VIDEO_MIMES and
+                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
 
     def greetings(self,manifest):
         if not manifest.get('event_folder'):return []
@@ -102,7 +130,21 @@ class Gallery:
             _,done=downloader.next_chunk(num_retries=2)
             yield from writer.drain()
 
-    def zip_chunks(self,manifest,photos):
+    def video_chunks(self,file_id,start,end,chunk_size=1024*1024):
+        # Descarga parcial desde Drive para permitir reproducir y adelantar videos
+        # grandes sin cargarlos enteros en memoria ni en el disco del servidor.
+        position=start
+        while position<=end:
+            last=min(end,position+chunk_size-1)
+            req=self.delivery.service.files().get_media(fileId=file_id)
+            req.headers['Range']=f'bytes={position}-{last}'
+            data=req.execute(num_retries=2)
+            if len(data)!=last-position+1:
+                raise IOError('Drive no devolvió el rango solicitado.')
+            yield data
+            position+=len(data)
+
+    def zip_chunks(self,manifest,photos,video_groups=()):
         # ZIP en flujo: no acumular el álbum completo en memoria ni disco de Render Free.
         writer=ChunkWriter()
         with zipfile.ZipFile(writer,'w',compression=zipfile.ZIP_STORED,allowZip64=True) as archive:
@@ -112,6 +154,17 @@ class Gallery:
                     for chunk in self.download_chunks(photo['id']):
                         member.write(chunk);yield from writer.drain()
                 yield from writer.drain()
+            for folder_name,videos in video_groups:
+                for index,video in enumerate(videos,1):
+                    ext=video['name'].rsplit('.',1)[-1].lower()
+                    if ext not in {'mp4','mov','webm','m4v'}:
+                        ext={'video/mp4':'mp4','video/quicktime':'mov',
+                             'video/webm':'webm','video/x-m4v':'m4v'}[video['mimeType']]
+                    with archive.open(f'{manifest["slug"]}/{folder_name}/{folder_name}-{index:04d}.{ext}',
+                                      'w',force_zip64=True) as member:
+                        for chunk in self.download_chunks(video['id']):
+                            member.write(chunk);yield from writer.drain()
+                    yield from writer.drain()
             greetings=self.greetings(manifest)
             if greetings:
                 text=manifest['name']+'\n\n'+'\n\n'.join((m.get('nombre') or 'Invitado')+'\n'+m.get('texto','') for m in greetings)
@@ -133,7 +186,14 @@ def register_gallery(app,gallery):
         manifest=gallery.authorized(slug);token=gallery.token(manifest);query=urlencode({'acceso':token})
         date=datetime.fromisoformat(manifest['date']) if manifest.get('date') else None;event=dict(manifest,kind='Fiesta de 15' if re.match(r'^(15|XV)\s',manifest['name'],re.I) else 'Álbum del evento',display_date=f'{date.day} de {MONTHS[date.month-1]} de {date.year}' if date else 'Fecha por confirmar')
         photos=[dict(id=p['id'],preview_url=f'/album/{slug}/foto/{p["id"]}?{query}',download_url=f'/album/{slug}/foto/{p["id"]}?{query}&descargar=1') for p in gallery.photos(manifest)]
-        html=render_template('gallery.html',event=event,photos=photos,greetings=gallery.greetings(manifest),zip_url=f'/album/{slug}/descargar?{query}',greetings_url=f'/album/{slug}/saludos?{query}',preview=False)
+        videos=[dict(id=v['id'],play_url=f'/album/{slug}/video/{v["id"]}?{query}',
+                     download_url=f'/album/{slug}/video/{v["id"]}?{query}&descargar=1',
+                     mime=v['mimeType'],
+                     title=v['name'].rsplit('.',1)[0].replace('_',' ').replace('-',' ').strip())
+                for v in gallery.videos(manifest)]
+        html=render_template('gallery.html',event=event,photos=photos,videos=videos,
+                             greetings=gallery.greetings(manifest),zip_url=f'/album/{slug}/descargar?{query}',
+                             greetings_url=f'/album/{slug}/saludos?{query}',preview=False)
         return protected(Response(html,mimetype='text/html'))
 
     @app.get('/album/<slug>/foto/<file_id>')
@@ -153,10 +213,46 @@ def register_gallery(app,gallery):
         except Exception:abort(415)
         return protected(Response(buffer.getvalue(),mimetype='image/jpeg'))
 
+    @app.get('/album/<slug>/video/<file_id>')
+    def gallery_video(slug,file_id):
+        manifest=gallery.authorized(slug)
+        videos=gallery.videos(manifest)
+        matches=[v for v in videos if v['id']==file_id]
+        if len(matches)!=1:abort(404)
+        video=matches[0]
+        size=int(video.get('size') or 0)
+        if size<=0:abort(503)
+        start,end=0,size-1
+        supplied_range=request.headers.get('Range')
+        def invalid_range():
+            return protected(Response(status=416,headers={'Content-Range':f'bytes */{size}'}))
+        if supplied_range:
+            match=re.fullmatch(r'bytes=(\d*)-(\d*)',supplied_range.strip())
+            if not match or (not match[1] and not match[2]):return invalid_range()
+            if not match[1]:
+                length=int(match[2])
+                if length<=0:return invalid_range()
+                start=max(0,size-length)
+            else:
+                start=int(match[1])
+                if match[2]:end=min(size-1,int(match[2]))
+            if start>=size or end<start:return invalid_range()
+        response=Response(stream_with_context(gallery.video_chunks(file_id,start,end)),
+                          status=206 if supplied_range else 200,mimetype=video['mimeType'])
+        response.headers['Accept-Ranges']='bytes'
+        response.headers['Content-Length']=str(end-start+1)
+        if supplied_range:response.headers['Content-Range']=f'bytes {start}-{end}/{size}'
+        if request.args.get('descargar')=='1':
+            ext=video['name'].rsplit('.',1)[-1].lower()
+            if ext not in {'mp4','mov','webm','m4v'}:ext={'video/mp4':'mp4','video/quicktime':'mov','video/webm':'webm','video/x-m4v':'m4v'}[video['mimeType']]
+            response.headers['Content-Disposition']=f'attachment; filename="{slug}-{file_id[-8:]}.{ext}"'
+        return protected(response)
+
     @app.get('/album/<slug>/descargar')
     def gallery_download(slug):
         manifest=gallery.authorized(slug);photos=gallery.photos(manifest)
-        response=Response(stream_with_context(gallery.zip_chunks(manifest,photos)),mimetype='application/zip')
+        groups=[('Videos',gallery.videos(manifest))]
+        response=Response(stream_with_context(gallery.zip_chunks(manifest,photos,groups)),mimetype='application/zip')
         response.headers['Content-Disposition']=f'attachment; filename="{slug}-album.zip"'
         return protected(response)
 

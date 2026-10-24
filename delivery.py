@@ -121,6 +121,9 @@ class Delivery:
         delivery = self.find_folder(self.root, 'Entregas', create)
         event = self.find_folder(delivery['id'], config['folder_name'], create) if delivery else None
         photos = self.find_folder(event['id'], 'Fotos originales', create) if event else None
+        if create and event:
+            # Cada nueva entrega nace con su carpeta de videos junto a Fotos originales.
+            self.find_folder(event['id'], 'Videos', create=True)
         if create and event and photos and self.gallery:
             self.gallery.register(config, event, photos)
         return event, photos
