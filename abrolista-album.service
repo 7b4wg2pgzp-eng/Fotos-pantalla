@@ -14,10 +14,10 @@ Environment=PYTHONDONTWRITEBYTECODE=1
 Environment=HOME=/run/abrolista-album
 RuntimeDirectory=abrolista-album
 RuntimeDirectoryMode=0700
-ExecStart=/opt/abrolista-album/venv/bin/gunicorn --bind 127.0.0.1:8002 --workers 2 --timeout 900 --max-requests 500 --max-requests-jitter 50 album_app:create_app()
+ExecStart=/opt/abrolista-album/venv/bin/gunicorn --bind 127.0.0.1:8002 --workers 2 --timeout 1800 --max-requests 500 --max-requests-jitter 50 album_app:create_app()
 Restart=always
 RestartSec=3
-TimeoutStopSec=910
+TimeoutStopSec=1810
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectHome=true
