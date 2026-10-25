@@ -18,7 +18,7 @@
   {% for video in videos %}
     <article class="video-card">
       <video controls playsinline preload="metadata" aria-label="{{ video.title or ('Video ' ~ loop.index) }}"><source src="{{ video.play_url }}" type="{{ video.mime }}">Si el video no se reproduce, descargalo con el enlace siguiente.</video>
-      <div class="photo-caption"><span>{{ video.title or ('Video ' ~ loop.index) }}</span><a href="{{ video.download_url }}" download>Descargar original ↘</a></div>
+      <div class="photo-caption"><a href="{{ video.download_url }}" download>Descargar original ↘</a></div>
     </article>
   {% endfor %}
   </div>
