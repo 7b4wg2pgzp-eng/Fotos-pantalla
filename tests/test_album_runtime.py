@@ -4,7 +4,26 @@ import io
 import json
 import unittest
 from unittest.mock import MagicMock, patch
-from album_app import create_app
+from album_app import create_app, ThreadLocalDrive
+from concurrent.futures import ThreadPoolExecutor
+import threading
+
+
+class ThreadLocalDriveTests(unittest.TestCase):
+    def test_request_threads_have_separate_reusable_http_transports(self):
+        barrier=threading.Barrier(2)
+        with patch.dict('os.environ',{'GOOGLE_CLIENT_ID':'test-id','GOOGLE_CLIENT_SECRET':'test-secret','GOOGLE_REFRESH_TOKEN':'test-refresh'}):
+            connection=ThreadLocalDrive()
+        services=[MagicMock(),MagicMock()]
+        def use(_):
+            first=connection.files();barrier.wait(timeout=5)
+            self.assertIs(connection.files(),first)
+            return first
+        with patch('album_app.build',side_effect=services) as build:
+            with ThreadPoolExecutor(max_workers=2) as executor:
+                results=list(executor.map(use,range(2)))
+        self.assertEqual(build.call_count,2)
+        self.assertIsNot(results[0],results[1])
 
 
 class PermanentAlbumTests(unittest.TestCase):

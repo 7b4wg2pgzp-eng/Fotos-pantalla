@@ -1,6 +1,6 @@
 """Galería por enlace de entrega, independiente de las fotos temporales de pantalla."""
-import io,json,re,hmac,hashlib,unicodedata,threading,zipfile,os,urllib.request
-from collections import deque
+import io,json,re,hmac,hashlib,unicodedata,threading,zipfile,os,urllib.request,time
+from collections import deque,OrderedDict
 from urllib.parse import urlencode
 from datetime import datetime
 from flask import request,render_template,Response,abort,stream_with_context
@@ -29,6 +29,7 @@ class Gallery:
         self.album_source_url=album_source_url
         self.lock=threading.RLock();self.cache={}
         self.media=AlbumMedia(delivery)
+        self.event_data=OrderedDict()
 
     def manifests(self):
         rows=self.delivery.list_files(self.delivery.data_folder(),"name contains 'album-' and mimeType != 'application/vnd.google-apps.folder'")
@@ -104,8 +105,25 @@ class Gallery:
     def photos(self,manifest):
         return self.unique_media(self.media.photos(manifest))
 
-    def videos(self,manifest):
+    def cached_event_data(self,key,load,fresh=False):
+        if fresh:return load()
+        with self.lock:
+            now=time.monotonic()
+            cached=self.event_data.get(key)
+            if cached is not None and now<cached[0]:return cached[1]
+            data=load()
+            self.event_data[key]=(time.monotonic()+15,data)
+            self.event_data.move_to_end(key)
+            while len(self.event_data)>32 or sum(len(v[1]) for v in self.event_data.values())>20000:
+                self.event_data.popitem(last=False)
+            return data
+
+    def videos(self,manifest,fresh=False):
         if not manifest.get('event_folder'):return []
+        key=('videos',manifest['event_folder'],manifest['identity'])
+        return self.cached_event_data(key,lambda:self.load_videos(manifest),fresh)
+
+    def load_videos(self,manifest):
         # Carpeta única para reels, historias, videos editados y resúmenes completos.
         # Se crea automáticamente al abrir un álbum autorizado, también si es antiguo.
         folder_key=hashlib.sha256(('videos:'+manifest['event_folder']).encode()).hexdigest()
@@ -117,6 +135,9 @@ class Gallery:
 
     def greetings(self,manifest):
         if not manifest.get('event_folder'):return []
+        return self.cached_event_data(('greetings',manifest['event_folder'],manifest['identity']),lambda:self.load_greetings(manifest))
+
+    def load_greetings(self,manifest):
         files=self.delivery.list_files(manifest['event_folder'],"name = 'Saludos.json'")
         if len(files)>1:raise RuntimeError('Saludos duplicados.')
         return json.loads(self.delivery.service.files().get_media(fileId=files[0]['id']).execute()) if files else []
@@ -240,7 +261,7 @@ def register_gallery(app,gallery):
     @app.get('/album/<slug>/video/<file_id>')
     def gallery_video(slug,file_id):
         manifest=gallery.authorized(slug)
-        videos=gallery.videos(manifest)
+        videos=gallery.videos(manifest,fresh=True)
         matches=[v for v in videos if v['id']==file_id]
         if len(matches)!=1:abort(404)
         video=matches[0]
@@ -275,7 +296,7 @@ def register_gallery(app,gallery):
     @app.get('/album/<slug>/descargar')
     def gallery_download(slug):
         manifest=gallery.authorized(slug);photos=gallery.photos(manifest)
-        groups=[('Videos',gallery.videos(manifest))]
+        groups=[('Videos',gallery.videos(manifest,fresh=True))]
         response=Response(stream_with_context(gallery.zip_chunks(manifest,photos,groups)),mimetype='application/zip')
         response.headers['Content-Disposition']=f'attachment; filename="{slug}-album.zip"'
         return protected(response)

@@ -75,6 +75,23 @@ class ManualAlbumMediaTests(unittest.TestCase):
         self.media['videos-4'][0]['md5Checksum']='identical'
         self.assertEqual(len(self.gallery.videos(self.manifest)),3)
 
+    def test_fast_page_reuses_video_metadata_but_playback_rechecks_membership(self):
+        original=self.gallery.delivery.list_files
+        with patch.object(self.gallery.delivery,'list_files',wraps=original) as listing:
+            self.gallery.videos(self.manifest)
+            calls=listing.call_count
+            self.gallery.videos(self.manifest)
+            self.assertEqual(listing.call_count,calls)
+            self.gallery.videos(self.manifest,fresh=True)
+            self.assertGreater(listing.call_count,calls)
+        self.assertEqual(self.client.get('/vicky-herrera'+self.query).status_code,200)
+        self.assertEqual(self.client.get('/vicky-herrera?acceso=invalid').status_code,404)
+        html=self.client.get('/vicky-herrera'+self.query).data
+        self.assertIn(b'href="#videos"',html)
+        self.assertIn(b'href="#fotos"',html)
+        self.assertIn(b'preload="none"',html)
+        self.assertNotIn(b'preload="metadata"',html)
+
     def test_video_access_cannot_bypass_the_album_token(self):
         self.assertEqual(self.client.get('/album/vicky-herrera/video/reel-1').status_code, 404)
         self.assertEqual(self.client.get('/album/vicky-herrera/video/other-photo' + self.query).status_code, 404)

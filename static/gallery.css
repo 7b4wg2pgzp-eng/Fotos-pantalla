@@ -92,3 +92,5 @@ dialog::backdrop{background:#1c172e80;backdrop-filter:blur(14px)}.viewer-prev,.v
   .video-card .photo-caption{font-size:10px}
 }
 @media(max-width:410px){.video-grid{grid-template-columns:minmax(0,1fr);max-width:340px;margin:0 auto}}
+
+.album-sections{display:flex;gap:8px;justify-content:center;flex-wrap:wrap}.album-sections .quiet{white-space:nowrap}#fotos,#videos,#saludos{scroll-margin-top:110px}
