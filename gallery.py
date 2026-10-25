@@ -123,13 +123,13 @@ class Gallery:
 
     def download_chunks(self,file_id):
         from googleapiclient.http import MediaIoBaseDownload
-        writer=ChunkWriter();downloader=MediaIoBaseDownload(writer,self.delivery.service.files().get_media(fileId=file_id),chunksize=512*1024)
+        writer=ChunkWriter();downloader=MediaIoBaseDownload(writer,self.delivery.service.files().get_media(fileId=file_id),chunksize=4*1024*1024)
         done=False
         while not done:
             _,done=downloader.next_chunk(num_retries=2)
             yield from writer.drain()
 
-    def video_chunks(self,file_id,start,end,chunk_size=1024*1024):
+    def video_chunks(self,file_id,start,end,chunk_size=4*1024*1024):
         # Descarga parcial desde Drive para permitir reproducir y adelantar videos
         # grandes sin cargarlos enteros en memoria ni en el disco del servidor.
         position=start

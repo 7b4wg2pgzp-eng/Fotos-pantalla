@@ -64,7 +64,7 @@ git -C "${STAGE}/src" checkout -q --detach FETCH_HEAD
 echo 'Preparando una publicación aislada, conservando secretos y versiones anteriores...'
 [[ ! -e "${NEW}" ]] || { echo "Ya existe la versión ${NEW}" >&2; exit 1; }
 cp -a -- "${OLD}" "${NEW}"
-for file in album_app.py gallery.py delivery.py album_media.py album_cache.py prepare_album_thumbnails.py; do
+for file in album_app.py gallery.py delivery.py album_media.py album_cache.py album_dng.py prepare_album_thumbnails.py; do
   install -m 0644 "${STAGE}/src/${file}" "${NEW}/${file}"
 done
 install -d "${NEW}/templates" "${NEW}/static" "${NEW}/tests"

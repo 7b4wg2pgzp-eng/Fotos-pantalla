@@ -236,6 +236,16 @@ class AlbumThumbnailTests(unittest.TestCase):
         self.gallery.media.memory.clear(); self.gallery.media.memory_size = 0
         self.assertEqual(self.client.get(self.url).status_code, 503)
 
+    def test_large_manual_dng_uses_embedded_preview_and_preserves_original(self):
+        photo=self.drive.add('manual-dng','Manual.dng','album',mime='image/dng',data=b'raw-original')
+        photo['size']='90000000'
+        with patch.object(self.gallery.media,'dng_preview',return_value=self.original) as preview:
+            response=self.client.get('/album/fake/miniatura/manual-dng')
+        self.assertEqual(response.status_code,200)
+        self.assertLess(len(response.data),256*1024)
+        preview.assert_called_once()
+        self.assertEqual(self.drive.data['manual-dng'],b'raw-original')
+
     def test_manual_photo_has_thumbnail_and_deduplicates_with_automatic_copy(self):
         self.drive.add('manual-photo', 'Manual.jpg', 'album', data=self.original + b'manual')
         self.drive.add('manual-duplicate', 'Duplicate.jpg', 'album', data=self.original)
