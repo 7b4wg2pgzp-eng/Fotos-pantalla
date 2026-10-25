@@ -14,7 +14,7 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import Optional
-from delivery import Delivery, parse_date
+from delivery import Delivery, parse_date, photo_uid
 from event_source import EventSource
 from gallery import Gallery, register_gallery
 
@@ -440,13 +440,19 @@ def api_upload():
 
 @app.route("/api/photos")
 def api_photos():
-    corte = time.time() - RETENTION_SECONDS
-    files = [
-        p for p in CACHE_DIR.iterdir()
-        if p.is_file() and p.suffix.lower() == ".jpg" and p.stat().st_mtime >= corte
-    ]
-    files.sort(key=lambda p: p.stat().st_mtime)
-    return jsonify(photos=[f"/photos/{p.name}" for p in files])
+    with _event_lock:
+        try:
+            vetoes = _photo_vetoes()
+        except Exception:
+            return jsonify(ok=False, photos=[], error="No se pudo verificar la moderación."), 503
+        corte = time.time() - RETENTION_SECONDS
+        files = [
+            p for p in CACHE_DIR.iterdir()
+            if p.is_file() and p.suffix.lower() == ".jpg" and p.stat().st_mtime >= corte
+            and photo_uid(p.name) not in vetoes
+        ]
+        files.sort(key=lambda p: p.stat().st_mtime)
+        return jsonify(photos=[f"/photos/{p.name}" for p in files])
 
 
 @app.route("/api/mensajes")
@@ -460,7 +466,23 @@ def serve_photo(filename):
     safe = secure_filename(filename)
     if safe != filename:
         abort(404)
-    return send_from_directory(CACHE_DIR, filename)
+    with _event_lock:
+        try:
+            vetoed = photo_uid(filename) in _photo_vetoes()
+        except Exception:
+            abort(503)
+        if vetoed:
+            abort(404)
+        response = send_from_directory(CACHE_DIR, filename)
+        response.headers['Cache-Control'] = 'no-store'
+        return response
+
+
+def _photo_vetoes():
+    local = {p.stem.removeprefix('moderation-') for p in CACHE_DIR.glob('moderation-*.json')}
+    if _drive_service:
+        local.update(_delivery.vetoes())
+    return local
 
 
 # ---- Clave del moderador ----
@@ -578,26 +600,28 @@ def admin_entrega():
 def admin_borrar_foto():
     if not _check_admin():
         return jsonify(ok=False), 403
-    nombre = secure_filename(request.form.get("nombre", ""))
-    if not nombre:
+    nombre = request.form.get("nombre", "")
+    uid = photo_uid(nombre)
+    if not uid or nombre != uid + '.jpg':
         return jsonify(ok=False), 400
-    ruta = CACHE_DIR / nombre
-    if ruta.exists():
-        ruta.unlink()
-    uid = nombre.rsplit(".", 1)[0]
-    if _drive_service:
+    with _event_lock:
         try:
-            res = _drive_service.files().list(
-                q="name contains '" + uid + "'", fields="files(id,name)").execute()
-            for f in res.get("files", []):
-                _drive_service.files().delete(fileId=f["id"]).execute()
+            # Mantener oculto incluso si Drive falla antes de persistir el veto.
+            marker = CACHE_DIR / ('moderation-' + uid + '.json')
+            temporary = marker.with_suffix('.tmp')
+            temporary.write_text(json.dumps(dict(uid=uid)), encoding='utf-8')
+            temporary.replace(marker)
+            (CACHE_DIR / nombre).unlink(missing_ok=True)
+            result = _delivery.moderate_photo(uid)
+            for original in PHOTOS_DIR.glob(uid + '.*'):
+                if original.is_file():
+                    original.unlink()
+            return jsonify(ok=True, **result)
         except Exception:
             import traceback
             traceback.print_exc()
-    else:
-        for p in PHOTOS_DIR.glob(uid + ".*"):
-            p.unlink()
-    return jsonify(ok=True)
+            return jsonify(ok=False, pending=True,
+                           error="No se completó la eliminación o su veto persistente en Drive. Volvé a intentar."), 503
 
 
 @app.route("/api/admin/borrar-mensaje", methods=["POST"])
@@ -628,6 +652,7 @@ def _restore_from_drive():
                 print("[restore] saludos recuperados de Drive.")
 
         # 2) Previews de fotos
+        vetoes = _photo_vetoes()
         corte = time.time() - RETENTION_SECONDS
         carpeta_previews = get_subfolder("Previews")
         q = "name contains 'preview-' and trashed = false"
@@ -642,6 +667,8 @@ def _restore_from_drive():
             for archivo in res.get("files", []):
                 nombre = archivo["name"]
                 if not nombre.startswith("preview-"):
+                    continue
+                if photo_uid(nombre) in vetoes:
                     continue
                 creado = archivo.get("createdTime", "")
                 try:
@@ -697,6 +724,19 @@ def _reset_event_runtime(config, previous):
         MESSAGES_FILE.write_text(json.dumps(remaining, ensure_ascii=False), encoding="utf-8")
 
 
+def _persistent_event_messages():
+    """Leer el respaldo vigente; ante un fallo no habilitar archivo ni limpieza."""
+    folder = _delivery.find_folder(GDRIVE_FOLDER_ID, "Datos")
+    rows = _delivery.list_files(folder["id"], "name = 'mensajes.json'") if folder else []
+    if len(rows) > 1:
+        raise RuntimeError("Hay más de un archivo de saludos temporales.")
+    persisted = json.loads(_drive_service.files().get_media(fileId=rows[0]["id"]).execute()) if rows else []
+    if not isinstance(persisted, list) or any(not isinstance(m, dict) or "ts" not in m for m in persisted):
+        raise RuntimeError("El respaldo de saludos no es válido.")
+    combined = {json.dumps(m, sort_keys=True, ensure_ascii=False): m for m in persisted + load_messages()}
+    return list(combined.values())
+
+
 def _close_event_runtime(config):
     """Retira archivos temporales al finalizar una fiesta ya archivada.
 
@@ -716,7 +756,7 @@ def _close_event_runtime(config):
                 ).execute()
 
     # Los saludos del evento fueron copiados a Entregas antes de llamar aquí.
-    remaining = [m for m in load_messages() if float(m.get("ts", 0)) >= cutoff]
+    remaining = [m for m in _persistent_event_messages() if float(m.get("ts", 0)) >= cutoff]
     data_folder = _delivery.find_folder(GDRIVE_FOLDER_ID, "Datos")
     if data_folder:
         existing = _delivery.list_files(data_folder["id"], "name = 'mensajes.json'")
@@ -741,7 +781,8 @@ def _close_event_runtime(config):
     print("[evento] cerrada entrega anterior; previews y saludos temporales depurados.")
 
 
-_event_source = EventSource(_delivery, _reset_event_runtime, close_runtime=_close_event_runtime)
+_event_source = EventSource(_delivery, _reset_event_runtime, close_runtime=_close_event_runtime,
+                            closure_messages=_persistent_event_messages)
 
 
 @app.before_request
@@ -789,5 +830,6 @@ if __name__ == "__main__":
     print(f"Loop fotos (OBS):   http://0.0.0.0:{PORT}/loop")
     print(f"Saludos (VJ):       http://0.0.0.0:{PORT}/saludos")
     app.run(host="0.0.0.0", port=PORT, debug=False)
+
 
 

@@ -9,9 +9,10 @@ from datetime import datetime, timezone
 from delivery import parse_date, validate_config
 
 class EventSource:
-    def __init__(self, delivery, reset_runtime, fetch=None, close_runtime=None):
+    def __init__(self, delivery, reset_runtime, fetch=None, close_runtime=None, closure_messages=None):
         self.delivery, self.reset_runtime = delivery, reset_runtime
         self.close_runtime = close_runtime
+        self.closure_messages = closure_messages
         self.fetch = fetch or self.fetch_remote
         self.lock = threading.RLock()
         self.rows=[]
@@ -58,7 +59,7 @@ class EventSource:
             if (previous and previous.get('enabled') and not previous.get('closed')
                     and parse_date(previous['end']) <= now):
                 if not previous.get('close_pending'):
-                    self.delivery.reconcile(messages)
+                    self.delivery.reconcile(self.closure_messages() if self.closure_messages else messages)
                     previous=dict(previous,close_pending=True)
                     self.delivery.save_config(previous)
                 if self.close_runtime:

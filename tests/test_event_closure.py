@@ -67,6 +67,21 @@ class EventClosureTests(unittest.TestCase):
         self.assertEqual(len(self.delivery.reconciled),1)
         self.assertEqual(len(self.cleaned),1)
 
+    def test_persistent_greeting_failure_blocks_cleanup_and_state_change(self):
+        def failed():
+            raise OSError('Persistent greeting read failed')
+        source = self.make_source()
+        source.closure_messages = failed
+        with self.assertRaises(OSError):
+            source.ensure([], now=self.now)
+        self.assertEqual(self.cleaned, [])
+        self.assertEqual(self.delivery.saved, [])
+        self.assertEqual(self.delivery.reconciled, [])
+        source.closure_messages = lambda: [{'texto': 'persisted', 'ts': 123}]
+        source.ensure([], now=self.now)
+        self.assertEqual(self.delivery.reconciled, [[{'texto': 'persisted', 'ts': 123}]])
+        self.assertTrue(self.delivery.config['closed'])
+
     def test_does_not_cleanup_an_active_event(self):
         source=self.make_source([self.event])
         active=source.ensure([],now=datetime(2026,10,17,16,0,tzinfo=timezone.utc))

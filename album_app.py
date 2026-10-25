@@ -1,12 +1,16 @@
 """Galería permanente: Drive y Abrolista local, sin cargar la app de pantalla."""
 import os
 import time
+import hashlib
+import tempfile
+from pathlib import Path
 from flask import Flask, jsonify
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from pillow_heif import register_heif_opener
 from delivery import Delivery
 from gallery import Gallery, register_gallery
+from album_cache import ThumbnailCache
 
 
 class ResidentGallery(Gallery):
@@ -40,6 +44,15 @@ def create_app(service=None):
                         lambda: os.environ['GDRIVE_DATA_FOLDER_ID'], 'unused-gallery-state.json')
     gallery = ResidentGallery(delivery, os.environ['GALLERY_LINK_SECRET'],
                               album_source_url='http://127.0.0.1:8000/api/eventphotos/album')
+    # Album-only, shared between workers and preserved over worker reloads.
+    # No originals or authorization decisions are stored here.
+    scope = hashlib.sha256(delivery.root.encode()).hexdigest()[:16]
+    cache_dir = os.environ.get('ALBUM_THUMBNAIL_CACHE_DIR') or str(
+        Path(tempfile.gettempdir()) / ('album-thumbnail-bytes-' + scope))
+    try:
+        gallery.media.disk_cache = ThumbnailCache(cache_dir)
+    except OSError:
+        app.logger.warning('Thumbnail disk cache unavailable; using Drive and memory.')
     register_gallery(app, gallery)
     app.extensions['album_gallery'] = gallery
 
@@ -48,3 +61,4 @@ def create_app(service=None):
         return jsonify(ok=True)
 
     return app
+

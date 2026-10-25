@@ -11,7 +11,8 @@ RELEASES="${APP_ROOT}/releases"
 VENV="${APP_ROOT}/venv"
 SERVICE=abrolista-album.service
 # SHA exacto del cambio aprobado y probado en GitHub (2026-10-24).
-REVISION=afcc7895b562a5504daee29ccb2fdd5e4bb8f357
+REVISION=${1:-}
+[[ ${REVISION} =~ ^[0-9a-f]{40}$ ]] || { echo 'Indicar el SHA completo auditado como primer argumento.' >&2; exit 1; }
 REPOSITORY=https://github.com/7b4wg2pgzp-eng/Fotos-pantalla.git
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -63,15 +64,15 @@ git -C "${STAGE}/src" checkout -q --detach FETCH_HEAD
 echo 'Preparando una publicación aislada, conservando secretos y versiones anteriores...'
 [[ ! -e "${NEW}" ]] || { echo "Ya existe la versión ${NEW}" >&2; exit 1; }
 cp -a -- "${OLD}" "${NEW}"
-for file in album_app.py gallery.py delivery.py; do
+for file in album_app.py gallery.py delivery.py album_media.py album_cache.py prepare_album_thumbnails.py; do
   install -m 0644 "${STAGE}/src/${file}" "${NEW}/${file}"
 done
 install -d "${NEW}/templates" "${NEW}/static" "${NEW}/tests"
 install -m 0644 "${STAGE}/src/templates/gallery.html" "${NEW}/templates/gallery.html"
 install -m 0644 "${STAGE}/src/static/gallery.css" "${NEW}/static/gallery.css"
 install -m 0644 "${STAGE}/src/static/gallery.js" "${NEW}/static/gallery.js"
-install -m 0644 "${STAGE}/src/tests/test_album_runtime.py" "${NEW}/tests/test_album_runtime.py"
-install -m 0644 "${STAGE}/src/tests/test_album_manual_media.py" "${NEW}/tests/test_album_manual_media.py"
+install -m 0644 "${STAGE}/src/static/album_loader.js" "${NEW}/static/album_loader.js"
+install -m 0644 "${STAGE}/src/tests/"test_*.py "${NEW}/tests/"
 printf '%s\n' "${REVISION}" > "${NEW}/REVISION"
 
 echo 'Comprobando sintaxis y pruebas de la galería antes del reinicio...'
