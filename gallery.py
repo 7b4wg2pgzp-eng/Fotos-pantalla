@@ -6,6 +6,7 @@ from datetime import datetime
 from flask import request,render_template,Response,abort,stream_with_context
 from PIL import Image,ImageOps
 from delivery import parse_date,TZ,FOLDER
+from album_media import AlbumMedia, AlbumUnavailable, UnsupportedPreview
 
 MONTHS=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septiembre','octubre','noviembre','diciembre']
 IMAGE_MIMES={'image/jpeg','image/png','image/webp','image/heic','image/heif','image/gif','image/tiff','image/bmp'}
@@ -27,6 +28,7 @@ class Gallery:
             raise ValueError('Origen privado de álbum no permitido.')
         self.album_source_url=album_source_url
         self.lock=threading.RLock();self.cache={}
+        self.media=AlbumMedia(delivery)
 
     def manifests(self):
         rows=self.delivery.list_files(self.delivery.data_folder(),"name contains 'album-' and mimeType != 'application/vnd.google-apps.folder'")
@@ -100,18 +102,15 @@ class Gallery:
         return result
 
     def photos(self,manifest):
-        if not manifest.get('photos_folder'):return []
-        # Incluye las copias automáticas y las imágenes agregadas manualmente a la
-        # carpeta de esta entrega. Nunca incorpora archivos marcados para otro evento.
-        return self.unique_media([f for f in self.delivery.list_files(manifest['photos_folder'])
-                       if f.get('mimeType') in IMAGE_MIMES and
-                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
+        return self.unique_media(self.media.photos(manifest))
 
     def videos(self,manifest):
         if not manifest.get('event_folder'):return []
         # Carpeta única para reels, historias, videos editados y resúmenes completos.
         # Se crea automáticamente al abrir un álbum autorizado, también si es antiguo.
-        folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDER,create=True)
+        folder_key=hashlib.sha256(('videos:'+manifest['event_folder']).encode()).hexdigest()
+        with self.media.process_lock(folder_key):
+            folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDER,create=True)
         return self.unique_media([f for f in self.delivery.list_files(folder['id'])
                        if f.get('mimeType') in VIDEO_MIMES and
                        f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
@@ -180,12 +179,20 @@ def register_gallery(app,gallery):
         response.headers['X-Content-Type-Options']='nosniff'
         return response
 
+    @app.errorhandler(AlbumUnavailable)
+    def album_unavailable(error):
+        return protected(Response('No se pudo verificar el álbum. Volvé a intentar.',status=503,mimetype='text/plain'))
+
+    @app.errorhandler(UnsupportedPreview)
+    def unsupported_preview(error):
+        return protected(Response('Vista previa no disponible. Podés descargar el original.',status=415,mimetype='text/plain'))
+
     @app.get('/<slug>')
     @app.get('/album/<slug>')
     def gallery_page(slug):
         manifest=gallery.authorized(slug);token=gallery.token(manifest);query=urlencode({'acceso':token})
         date=datetime.fromisoformat(manifest['date']) if manifest.get('date') else None;event=dict(manifest,kind='Fiesta de 15' if re.match(r'^(15|XV)\s',manifest['name'],re.I) else 'Álbum del evento',display_date=f'{date.day} de {MONTHS[date.month-1]} de {date.year}' if date else 'Fecha por confirmar')
-        photos=[dict(id=p['id'],preview_url=f'/album/{slug}/foto/{p["id"]}?{query}',download_url=f'/album/{slug}/foto/{p["id"]}?{query}&descargar=1') for p in gallery.photos(manifest)]
+        photos=[dict(id=p['id'],preview_url=f'/album/{slug}/miniatura/{p["id"]}?{query}',download_url=f'/album/{slug}/foto/{p["id"]}?{query}&descargar=1') for p in gallery.photos(manifest)]
         videos=[dict(id=v['id'],play_url=f'/album/{slug}/video/{v["id"]}?{query}',
                      download_url=f'/album/{slug}/video/{v["id"]}?{query}&descargar=1',
                      mime=v['mimeType'],
@@ -193,10 +200,11 @@ def register_gallery(app,gallery):
                 for v in gallery.videos(manifest)]
         html=render_template('gallery.html',event=event,photos=photos,videos=videos,
                              greetings=gallery.greetings(manifest),zip_url=f'/album/{slug}/descargar?{query}',
-                             greetings_url=f'/album/{slug}/saludos?{query}',preview=False)
+                             greetings_url=f'/album/{slug}/saludos?{query}',status_url=f'/album/{slug}/estado?{query}',preview=False)
         return protected(Response(html,mimetype='text/html'))
 
     @app.get('/album/<slug>/foto/<file_id>')
+    @app.get('/album/<slug>/miniatura/<file_id>')
     def gallery_photo(slug,file_id):
         manifest=gallery.authorized(slug)
         photos=[p for p in gallery.photos(manifest) if p['id']==file_id]
@@ -206,12 +214,28 @@ def register_gallery(app,gallery):
             response=Response(stream_with_context(gallery.download_chunks(file_id)),mimetype=photo['mimeType'])
             suffix=photo['name'].rsplit('.',1)[-1].lower();response.headers['Content-Disposition']=f'attachment; filename="{slug}-{file_id[-8:]}.{suffix}"'
             return protected(response)
-        data=gallery.delivery.service.files().get_media(fileId=file_id).execute()
-        try:
-            with Image.open(io.BytesIO(data)) as image:
-                image=ImageOps.exif_transpose(image).convert('RGB');image.thumbnail((1400,1400));buffer=io.BytesIO();image.save(buffer,'JPEG',quality=85)
-        except Exception:abort(415)
-        return protected(Response(buffer.getvalue(),mimetype='image/jpeg'))
+        # Revalidate membership and veto BEFORE honoring a browser's cached thumbnail.
+        etag=gallery.media.key(photo)
+        if request.if_none_match.contains(etag):
+            response=protected(Response(status=304))
+        else:
+            try:
+                # photos() just checked current Drive veto metadata. Reuse verified bytes
+                # without repeating that network check on the hot path.
+                data=gallery.media.cached_thumbnail(photo)
+                if data is None:data=gallery.media.thumbnail(manifest,photo)
+            except (AlbumUnavailable,UnsupportedPreview):raise
+            except Exception as error:raise AlbumUnavailable('No se pudo preparar la miniatura.') from error
+            if data is None:abort(404)
+            response=protected(Response(data,mimetype='image/jpeg'))
+        response.set_etag(etag)
+        response.headers['Cache-Control']='private, no-cache, must-revalidate'
+        return response
+
+    @app.get('/album/<slug>/estado')
+    def gallery_state(slug):
+        manifest=gallery.authorized(slug)
+        return protected(Response(json.dumps(dict(photos=[p['id'] for p in gallery.photos(manifest)])),mimetype='application/json'))
 
     @app.get('/album/<slug>/video/<file_id>')
     def gallery_video(slug,file_id):

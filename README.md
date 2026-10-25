@@ -1,5 +1,9 @@
 # EventPhotos — muro de fotos en vivo
 
+Corrección de moderación preparada en la rama de pruebas: [comportamiento, pruebas y requisitos](MODERATION.md).
+
+Optimización del álbum familiar en esa misma rama: [miniaturas persistentes, preparación y verificación](ALBUM_PERFORMANCE.md).
+
 Servidor local: los invitados suben fotos desde el celular, vos las mostrás
 en loop como Browser Source en OBS o vMix.
 
@@ -83,3 +87,4 @@ Para bajarlo: `launchctl unload ~/Library/LaunchAgents/com.nico.eventphotos.plis
 - HEIC (formato nativo de iPhone) se soporta gracias a `pillow-heif`.
 - `/api/photos` devuelve la lista de fotos en orden de subida; `loop.html`
   la re-consulta cada 8s para sumar fotos nuevas sin recargar la página.
+
