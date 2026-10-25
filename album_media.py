@@ -13,6 +13,9 @@ from pathlib import Path
 
 from PIL import Image, ImageOps, UnidentifiedImageError
 from delivery import FOLDER, escaped, photo_uid
+from album_dng import extract_preview
+
+DNG_MIMES = {'image/dng', 'image/x-adobe-dng', 'image/x-dng'}
 
 VERSION = 'jpeg-512-v1'
 MAX_SOURCE_BYTES = 32 * 1024 * 1024
@@ -85,7 +88,7 @@ class AlbumMedia:
             cached = self.indexes.get(key)
             if cached is None or cached[0] <= time.monotonic():
                 rows = self.delivery.list_files(manifest['photos_folder'])
-                rows = sorted([p for p in rows if p.get('mimeType') in {'image/jpeg','image/png','image/webp','image/heic','image/heif','image/gif','image/tiff','image/bmp'}
+                rows = sorted([p for p in rows if p.get('mimeType') in {'image/jpeg','image/png','image/webp','image/heic','image/heif','image/gif','image/tiff','image/bmp'} | DNG_MIMES
                                and p.get('appProperties', {}).get('deliveryEvent') in (None, manifest['identity'])
                                and p.get('appProperties', {}).get('kind') != 'albumThumbnail'], key=lambda p: p['name'])
                 self.indexes[key] = (time.monotonic() + 15, rows)
@@ -192,24 +195,59 @@ class AlbumMedia:
                 self.folders.popitem(last=False)
         return folder['id']
 
+    def dng_preview(self, photo):
+        size = int(photo['size'])
+        blocks = {}
+        def current():
+            row = self.delivery.service.files().get(fileId=photo['id'], fields='size,md5Checksum').execute()
+            if row.get('md5Checksum') != photo['md5Checksum'] or int(row.get('size', 0)) != size:
+                raise AlbumUnavailable('El original DNG cambió durante la lectura.')
+        def read(offset, length):
+            # Cache the small TIFF directory reads; never download the RAW body.
+            start, count = offset, length
+            if length <= 8192:
+                start = offset // 65536 * 65536
+                count = min(size - start, max(65536, offset - start + length))
+                if (start, count) in blocks:
+                    return blocks[start, count][offset-start:offset-start+length]
+            request = self.delivery.service.files().get_media(fileId=photo['id'])
+            request.headers['Range'] = f'bytes={start}-{start+count-1}'
+            data = request.execute(num_retries=2)
+            if len(data) != count:
+                raise AlbumUnavailable('Drive no devolvió el rango DNG solicitado.')
+            if length <= 8192:
+                blocks[start, count] = data
+            return data[offset-start:offset-start+length]
+        current()
+        try:
+            preview = extract_preview(read, size)
+        except ValueError as error:
+            raise UnsupportedPreview('El DNG no contiene una vista JPEG compatible.') from error
+        current()
+        return preview
+
     def render(self, photo):
         from googleapiclient.http import MediaIoBaseDownload
-        if int(photo.get('size', MAX_SOURCE_BYTES + 1)) > MAX_SOURCE_BYTES:
+        dng = photo.get('mimeType') in DNG_MIMES
+        if not dng and int(photo.get('size', MAX_SOURCE_BYTES + 1)) > MAX_SOURCE_BYTES:
             raise UnsupportedPreview('El original es demasiado grande para la vista previa.')
         # Bounded disk spool: avoid holding the original and decoded pixels in RAM together.
         with tempfile.TemporaryFile() as original:
-            downloader = MediaIoBaseDownload(LimitedWriter(original, MAX_SOURCE_BYTES),
+            if dng:
+                original.write(self.dng_preview(photo))
+            else:
+                downloader = MediaIoBaseDownload(LimitedWriter(original, MAX_SOURCE_BYTES),
                                               self.delivery.service.files().get_media(fileId=photo['id']),
                                               chunksize=512 * 1024)
-            done = False
-            while not done:
-                _, done = downloader.next_chunk(num_retries=2)
-            original.seek(0)
-            digest = hashlib.md5()
-            for block in iter(lambda: original.read(512 * 1024), b''):
-                digest.update(block)
-            if digest.hexdigest() != photo['md5Checksum']:
-                raise AlbumUnavailable('El contenido del original cambió durante la lectura.')
+                done = False
+                while not done:
+                    _, done = downloader.next_chunk(num_retries=2)
+                original.seek(0)
+                digest = hashlib.md5()
+                for block in iter(lambda: original.read(512 * 1024), b''):
+                    digest.update(block)
+                if digest.hexdigest() != photo['md5Checksum']:
+                    raise AlbumUnavailable('El contenido del original cambió durante la lectura.')
             original.seek(0)
             try:
                 with Image.open(original) as image:
