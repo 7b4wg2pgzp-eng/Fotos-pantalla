@@ -3,6 +3,7 @@ import os
 import time
 import hashlib
 import tempfile
+import threading
 from pathlib import Path
 from flask import Flask, jsonify
 from google.oauth2.credentials import Credentials
@@ -11,6 +12,25 @@ from pillow_heif import register_heif_opener
 from delivery import Delivery
 from gallery import Gallery, register_gallery
 from album_cache import ThumbnailCache
+
+
+class ThreadLocalDrive:
+    """Each request thread owns its HTTP transport; credentials stay in memory."""
+    def __init__(self):
+        self.local = threading.local()
+        self.config = {key: os.environ[key] for key in
+                       ('GOOGLE_REFRESH_TOKEN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET')}
+
+    def files(self):
+        if not hasattr(self.local, 'service'):
+            credentials = Credentials(
+                None, refresh_token=self.config['GOOGLE_REFRESH_TOKEN'],
+                token_uri='https://oauth2.googleapis.com/token',
+                client_id=self.config['GOOGLE_CLIENT_ID'],
+                client_secret=self.config['GOOGLE_CLIENT_SECRET'],
+                scopes=['https://www.googleapis.com/auth/drive'])
+            self.local.service = build('drive', 'v3', credentials=credentials, cache_discovery=False)
+        return self.local.service.files()
 
 
 class ResidentGallery(Gallery):
@@ -32,13 +52,7 @@ def create_app(service=None):
     if len(os.environ['GALLERY_LINK_SECRET']) < 32:
         raise RuntimeError('La clave de enlaces del álbum no es válida.')
     if service is None:
-        credentials = Credentials(
-            None, refresh_token=os.environ['GOOGLE_REFRESH_TOKEN'],
-            token_uri='https://oauth2.googleapis.com/token',
-            client_id=os.environ['GOOGLE_CLIENT_ID'],
-            client_secret=os.environ['GOOGLE_CLIENT_SECRET'],
-            scopes=['https://www.googleapis.com/auth/drive'])
-        service = build('drive', 'v3', credentials=credentials, cache_discovery=False)
+        service = ThreadLocalDrive()
     app = Flask(__name__)
     delivery = Delivery(service, os.environ['GDRIVE_FOLDER_ID'],
                         lambda: os.environ['GDRIVE_DATA_FOLDER_ID'], 'unused-gallery-state.json')

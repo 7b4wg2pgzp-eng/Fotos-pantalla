@@ -1,3 +1,15 @@
+// Keep older open album documents lightweight after the updated script is fetched.
+document.querySelectorAll('.video-card video').forEach(video=>{
+  if(video.preload!=='none'){video.preload='none';if(video.paused)video.load();}
+});
+const collection=document.querySelector('.collection');
+if(collection&&!collection.id)collection.id='fotos';
+const introActions=document.querySelector('.intro-actions');
+if(introActions&&!introActions.querySelector('.album-sections')){
+  const sections=document.createElement('nav');sections.className='album-sections';sections.setAttribute('aria-label','Secciones del álbum');
+  [['fotos','Ver fotos ↓'],...(document.getElementById('videos')?[['videos','Ver videos ↓']]:[]),['saludos','Ver saludos ↓']].forEach(([id,label])=>{const link=document.createElement('a');link.className='quiet';link.href='#'+id;link.textContent=label;sections.append(link);});
+  introActions.querySelector('a[href="#saludos"]')?.remove();introActions.append(sections);
+}
 const photos=JSON.parse(document.getElementById('galleryData').textContent);
 const viewer=document.getElementById('viewer');
 const image=document.getElementById('viewerImage');

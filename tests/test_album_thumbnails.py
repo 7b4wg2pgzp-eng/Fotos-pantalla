@@ -284,7 +284,7 @@ class AlbumThumbnailTests(unittest.TestCase):
         self.assertIn(b'decoding="async"', response.data)
         self.assertIn(b'album_loader.js', response.data)
         for asset in (b'gallery.js', b'gallery.css', b'album_loader.js'):
-            self.assertIn(asset + b'?v=album-media-v3', response.data)
+            self.assertIn(asset + b'?v=album-fast-v4', response.data)
         self.assertNotIn(b'Momento 01', response.data)
         self.assertIn(b'descargar=1', response.data)
 
