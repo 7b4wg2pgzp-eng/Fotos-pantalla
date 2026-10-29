@@ -22,7 +22,7 @@ SSH_TARGET = 'abrolista'  # Atajo ya configurado en ~/.ssh/config de la Mac
 ENV_FILE = '/etc/abrolista-album.env'
 SCOPES = 'https://www.googleapis.com/auth/drive'
 
-VERSION = 'MAC-CURL-2'
+VERSION = 'MAC-CURL-3'
 
 def https_json(url, post=None, bearer=None):
     """Usa curl del sistema con TLS verificado, sin credenciales en argumentos ni archivos."""
@@ -164,7 +164,7 @@ def main():
     print('Reparación del álbum Abrolista. No se borran fotos.')
     print('0. Comprobando HTTPS de Google con curl de macOS...')
     try:
-        https_json('https://oauth2.googleapis.com/.well-known/openid-configuration')
+        https_json('https://accounts.google.com/.well-known/openid-configuration')
     except RuntimeError as exc:
         sys.exit('No se pudo validar HTTPS de Google con curl. ' + str(exc))
     print('HTTPS verificado con curl y certificados del sistema.')
