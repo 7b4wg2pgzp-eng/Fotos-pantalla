@@ -12,6 +12,7 @@ import secrets
 import shlex
 import subprocess
 import sys
+import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -21,6 +22,16 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 SSH_TARGET = 'abrolista'  # Atajo ya configurado en ~/.ssh/config de la Mac
 ENV_FILE = '/etc/abrolista-album.env'
 SCOPES = 'https://www.googleapis.com/auth/drive'
+
+def verified_tls_context():
+    # Python instalado desde python.org en macOS puede no tener sus CA inicializadas.
+    # Usar la cadena confiable de certifi SIN desactivar la validacion TLS.
+    try:
+        import certifi
+    except ImportError:
+        sys.exit('Falta certifi. Ejecuta: python3 -m pip install --user --upgrade certifi')
+    return ssl.create_default_context(cafile=certifi.where())
+
 
 REMOTE_READ = r'''
 import hashlib, json, pathlib, shlex, sys
@@ -128,6 +139,17 @@ def ssh_run(remote_code, stdin=None):
 
 def main():
     print('Reparación del álbum Abrolista. No se borran fotos.')
+    print('0. Comprobando HTTPS de Google con certificados verificados...')
+    tls = verified_tls_context()
+    try:
+        with urllib.request.urlopen('https://oauth2.googleapis.com/.well-known/openid-configuration', timeout=20, context=tls) as response:
+            if response.status != 200:
+                sys.exit('El servidor de Google no respondió correctamente por HTTPS.')
+    except Exception as exc:
+        sys.exit('No se pudo validar HTTPS de Google (certificados). '
+                 'Si acabas de instalar certifi y el error continúa, mandá el mensaje exacto. '
+                 'Detalle: ' + str(exc))
+    print('HTTPS validado. No se desactivó la seguridad SSL.')
     print('1. Revisando la conexión SSH y la configuración privada...')
     try:
         read=ssh_run(REMOTE_READ)
@@ -186,7 +208,7 @@ def main():
     req=urllib.request.Request('https://oauth2.googleapis.com/token',data=post,
                                headers={'Content-Type':'application/x-www-form-urlencoded'})
     try:
-        with urllib.request.urlopen(req,timeout=20) as response:
+        with urllib.request.urlopen(req,timeout=20,context=tls) as response:
             token_response=json.load(response)
     except urllib.error.HTTPError as ex:
         sys.exit('Google rechazó el canje OAuth (HTTP '+str(ex.code)+').')
@@ -200,7 +222,7 @@ def main():
             'fields':'id,name,mimeType','supportsAllDrives':'true'})
         req=urllib.request.Request(url,headers={'Authorization':'Bearer '+access})
         try:
-            with urllib.request.urlopen(req,timeout=20) as resp:
+            with urllib.request.urlopen(req,timeout=20,context=tls) as resp:
                 info=json.load(resp)
             if info.get('id') != folder_id:
                 sys.exit('La cuenta Google no coincide con las carpetas del álbum. Sin cambios.')
