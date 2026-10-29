@@ -2,7 +2,8 @@
 import io,json,re,hmac,hashlib,unicodedata,threading,zipfile,os,urllib.request,time
 from collections import deque,OrderedDict
 from urllib.parse import urlencode
-from datetime import datetime
+from datetime import datetime, date
+import calendar
 from flask import request,render_template,Response,abort,stream_with_context
 from PIL import Image,ImageOps
 from delivery import parse_date,TZ,FOLDER
@@ -12,6 +13,22 @@ MONTHS=['enero','febrero','marzo','abril','mayo','junio','julio','agosto','septi
 IMAGE_MIMES={'image/jpeg','image/png','image/webp','image/heic','image/heif','image/gif','image/tiff','image/bmp'}
 VIDEO_MIMES={'video/mp4','video/quicktime','video/webm','video/x-m4v'}
 VIDEO_FOLDER='Videos'
+ALBUM_ACCESS_MONTHS = 6
+
+
+def album_access_until(event_date):
+    """Last calendar day of access: six calendar months after the party date."""
+    day = date.fromisoformat(event_date)
+    month_index = (day.month - 1) + ALBUM_ACCESS_MONTHS
+    year = day.year + month_index // 12
+    month = month_index % 12 + 1
+    return date(year, month, min(day.day, calendar.monthrange(year, month)[1]))
+
+
+def album_today():
+    return datetime.now(TZ).date()
+
+
 
 class ChunkWriter:
     def __init__(self):self.position=0;self.queue=deque()
@@ -76,6 +93,12 @@ class Gallery:
         manifest=matches[0] if matches else self.resolve_empty(slug,request.args.get('acceso',''))
         supplied=request.args.get('acceso','')
         if not supplied or not hmac.compare_digest(supplied,self.token(manifest)):abort(404)
+        if manifest.get('date'):
+            try:
+                expired = album_today() > album_access_until(manifest['date'])
+            except (TypeError, ValueError):
+                abort(503)  # Fecha corrupta: no inventar vencimientos ni exponer archivos.
+            if expired:abort(410)
         return manifest
 
     def resolve_empty(self,slug,access):
@@ -208,11 +231,17 @@ def register_gallery(app,gallery):
     def unsupported_preview(error):
         return protected(Response('Vista previa no disponible. Podés descargar el original.',status=415,mimetype='text/plain'))
 
+    @app.errorhandler(410)
+    def album_expired(error):
+        return protected(Response('El acceso a este álbum terminó después de seis meses. Consultá con el equipo de Abrolista para cualquier consulta.',status=410,mimetype='text/plain'))
+
     @app.get('/<slug>')
     @app.get('/album/<slug>')
     def gallery_page(slug):
         manifest=gallery.authorized(slug);token=gallery.token(manifest);query=urlencode({'acceso':token})
         date=datetime.fromisoformat(manifest['date']) if manifest.get('date') else None;event=dict(manifest,kind='Fiesta de 15' if re.match(r'^(15|XV)\s',manifest['name'],re.I) else 'Álbum del evento',display_date=f'{date.day} de {MONTHS[date.month-1]} de {date.year}' if date else 'Fecha por confirmar')
+        expiry=album_access_until(manifest['date']) if manifest.get('date') else None
+        event['availability_until'] = f'{expiry.day} de {MONTHS[expiry.month - 1]} de {expiry.year}' if expiry else None
         photos=[dict(id=p['id'],preview_url=f'/album/{slug}/miniatura/{p["id"]}?{query}',download_url=f'/album/{slug}/foto/{p["id"]}?{query}&descargar=1') for p in gallery.photos(manifest)]
         videos=[dict(id=v['id'],play_url=f'/album/{slug}/video/{v["id"]}?{query}',
                      download_url=f'/album/{slug}/video/{v["id"]}?{query}&descargar=1',
