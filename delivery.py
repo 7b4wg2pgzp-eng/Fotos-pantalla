@@ -108,6 +108,12 @@ class Delivery:
             sources = self.list_files(originals['id']) if originals else []
             sources = [s for s in sources if s['mimeType'] != FOLDER and photo_uid(s['name']) == uid]
             source_ids.update(s['id'] for s in sources)
+            # La entrega conserva el UID incluso después de retirar el original temporal.
+            marker = f"appProperties has {{ key='photoUid' and value='{escaped(uid)}' }}"
+            for copy in self.query_files('trashed = false and ' + marker):
+                source_id = copy.get('appProperties', {}).get('sourceFileId')
+                if source_id:
+                    source_ids.add(source_id)
             # Los IDs se guardan antes de cualquier eliminación irreversible.
             self.save_veto(uid, source_ids)
             targets = {s: s for s in source_ids}
@@ -227,6 +233,54 @@ class Delivery:
             self.service.files().delete(fileId=copied['id']).execute()
             return None
         return event, copied
+
+    def verified_event_originals(self, config):
+        """Build a deletion plan only when every event original has an identical delivery copy."""
+        originals = self.find_folder(self.root, 'Originales')
+        if not originals:
+            return []
+        sources = [s for s in self.list_files(originals['id'])
+                   if s['mimeType'] != FOLDER and self.accepts(parse_date(s['createdTime']).timestamp(), config)]
+        if not sources:
+            return []
+        event, photos = self.folders(config, False)
+        if not event or not photos:
+            raise RuntimeError('Falta la entrega; no se limpiaron originales.')
+        copies = self.list_files(photos['id'])
+        planned = []
+        for source in sources:
+            matching = [c for c in copies if c.get('appProperties', {}).get('sourceFileId') == source['id']
+                        and c.get('appProperties', {}).get('deliveryEvent') == config['identity']]
+            if (len(matching) != 1 or not source.get('md5Checksum') or not source.get('size')
+                    or matching[0].get('md5Checksum') != source['md5Checksum']
+                    or matching[0].get('size') != source['size']):
+                raise RuntimeError('Entrega incompleta o diferente; no se limpiaron originales.')
+            planned.append(source['id'])
+        return planned
+
+    def clean_event_originals(self, config):
+        """Delete originals only after all delivery copies are verified and traceable."""
+        planned = self.verified_event_originals(config)
+        if not planned:
+            return
+        _, folder = self.folders(config, False)
+        copies = self.list_files(folder['id'])
+        originals = self.list_files(self.find_folder(self.root, 'Originales')['id'])
+        by_id = {item['id']: item for item in originals}
+        for source_id in planned:
+            uid = photo_uid(by_id[source_id]['name'])
+            if not uid:
+                raise RuntimeError('Original sin identificador verificable; limpieza detenida.')
+            matches = [c for c in copies if c.get('appProperties', {}).get('sourceFileId') == source_id and c.get('appProperties', {}).get('deliveryEvent') == config['identity']]
+            if len(matches) != 1:
+                raise RuntimeError('Entrega ambigua; limpieza detenida.')
+            props = dict(matches[0].get('appProperties', {}), photoUid=uid)
+            saved = self.service.files().update(fileId=matches[0]['id'], body={'appProperties': props}, fields='id,appProperties').execute()
+            if saved.get('appProperties', {}).get('photoUid') != uid or saved.get('appProperties', {}).get('sourceFileId') != source_id:
+                raise RuntimeError('No se verificó la identidad de la entrega; limpieza detenida.')
+        # All validation and identity metadata writes finish before any original is deleted.
+        for source_id in planned:
+            self.service.files().delete(fileId=source_id).execute()
 
     def on_photo(self, source_id):
         with self.lock:

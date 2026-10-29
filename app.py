@@ -740,7 +740,7 @@ def _persistent_event_messages():
 def _close_event_runtime(config):
     """Retira archivos temporales al finalizar una fiesta ya archivada.
 
-    No toca Originales, Entregas ni los archivos de autor de la galería.
+    Conserva Entregas y los archivos de autor de la galería.
     Los archivos técnicos se envían a Papelera (recuperables).
     """
     cutoff = parse_date(config["end"]).timestamp()
@@ -773,6 +773,8 @@ def _close_event_runtime(config):
                     fileId=item["id"], body={"trashed": True}, fields="id"
                 ).execute()
 
+    # Solo retirar originales después de verificar todas las copias de esta fiesta.
+    _delivery.clean_event_originals(config)
     # Limpiar caché solo después de completar las operaciones en Drive.
     for item in CACHE_DIR.glob("*.jpg"):
         if item.stat().st_mtime < cutoff:
