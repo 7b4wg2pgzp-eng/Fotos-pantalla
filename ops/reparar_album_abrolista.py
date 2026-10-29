@@ -12,7 +12,6 @@ import secrets
 import shlex
 import subprocess
 import sys
-import ssl
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -23,14 +22,37 @@ SSH_TARGET = 'abrolista'  # Atajo ya configurado en ~/.ssh/config de la Mac
 ENV_FILE = '/etc/abrolista-album.env'
 SCOPES = 'https://www.googleapis.com/auth/drive'
 
-def verified_tls_context():
-    # Python instalado desde python.org en macOS puede no tener sus CA inicializadas.
-    # Usar la cadena confiable de certifi SIN desactivar la validacion TLS.
+VERSION = 'MAC-CURL-2'
+
+def https_json(url, post=None, bearer=None):
+    """Usa curl del sistema con TLS verificado, sin credenciales en argumentos ni archivos."""
+    if post is not None and bearer is not None:
+        raise ValueError('Métodos HTTPS incompatibles')
+    cmd = ['curl', '--silent', '--show-error', '--fail', '--max-time', '30',
+           '--proto', '=https']
+    payload = None
+    if post is not None:
+        cmd += ['--header', 'Content-Type: application/x-www-form-urlencoded',
+                '--data-binary', '@-', url]
+        payload = post
+    elif bearer is not None:
+        # curl lee las cabeceras desde stdin: el access token no aparece en ps.
+        cmd += ['--config', '-']
+        payload = ('url = ' + json.dumps(url) + '\n' +
+                   'header = ' + json.dumps('Authorization: Bearer ' + bearer) + '\n').encode()
+    else:
+        cmd += [url]
     try:
-        import certifi
-    except ImportError:
-        sys.exit('Falta certifi. Ejecuta: python3 -m pip install --user --upgrade certifi')
-    return ssl.create_default_context(cafile=certifi.where())
+        result = subprocess.run(cmd, input=payload, capture_output=True, timeout=40)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise RuntimeError('Error al ejecutar curl: ' + str(exc)) from exc
+    if result.returncode:
+        reason = result.stderr.decode(errors='replace').strip()[-450:]
+        raise RuntimeError('curl no pudo completar HTTPS: ' + reason)
+    try:
+        return json.loads(result.stdout)
+    except ValueError as exc:
+        raise RuntimeError('Google no devolvió JSON válido por HTTPS.') from exc
 
 
 REMOTE_READ = r'''
@@ -138,18 +160,14 @@ def ssh_run(remote_code, stdin=None):
 
 
 def main():
+    print('REPARADOR VERSIÓN ' + VERSION)
     print('Reparación del álbum Abrolista. No se borran fotos.')
-    print('0. Comprobando HTTPS de Google con certificados verificados...')
-    tls = verified_tls_context()
+    print('0. Comprobando HTTPS de Google con curl de macOS...')
     try:
-        with urllib.request.urlopen('https://oauth2.googleapis.com/.well-known/openid-configuration', timeout=20, context=tls) as response:
-            if response.status != 200:
-                sys.exit('El servidor de Google no respondió correctamente por HTTPS.')
-    except Exception as exc:
-        sys.exit('No se pudo validar HTTPS de Google (certificados). '
-                 'Si acabas de instalar certifi y el error continúa, mandá el mensaje exacto. '
-                 'Detalle: ' + str(exc))
-    print('HTTPS validado. No se desactivó la seguridad SSL.')
+        https_json('https://oauth2.googleapis.com/.well-known/openid-configuration')
+    except RuntimeError as exc:
+        sys.exit('No se pudo validar HTTPS de Google con curl. ' + str(exc))
+    print('HTTPS verificado con curl y certificados del sistema.')
     print('1. Revisando la conexión SSH y la configuración privada...')
     try:
         read=ssh_run(REMOTE_READ)
@@ -205,13 +223,10 @@ def main():
         'code':oauth_result['code'],'code_verifier':verifier,
         'redirect_uri':redirect,'grant_type':'authorization_code'
     }).encode()
-    req=urllib.request.Request('https://oauth2.googleapis.com/token',data=post,
-                               headers={'Content-Type':'application/x-www-form-urlencoded'})
     try:
-        with urllib.request.urlopen(req,timeout=20,context=tls) as response:
-            token_response=json.load(response)
-    except urllib.error.HTTPError as ex:
-        sys.exit('Google rechazó el canje OAuth (HTTP '+str(ex.code)+').')
+        token_response = https_json('https://oauth2.googleapis.com/token', post=post)
+    except RuntimeError as exc:
+        sys.exit('No se pudo canjear la autorización OAuth. ' + str(exc))
     new_refresh=token_response.get('refresh_token')
     access=token_response.get('access_token')
     if not new_refresh or not access:
@@ -220,14 +235,12 @@ def main():
     for folder_id in config['root_ids']:
         url='https://www.googleapis.com/drive/v3/files/'+urllib.parse.quote(folder_id,safe='')+'?'+urllib.parse.urlencode({
             'fields':'id,name,mimeType','supportsAllDrives':'true'})
-        req=urllib.request.Request(url,headers={'Authorization':'Bearer '+access})
         try:
-            with urllib.request.urlopen(req,timeout=20,context=tls) as resp:
-                info=json.load(resp)
+            info = https_json(url, bearer=access)
             if info.get('id') != folder_id:
                 sys.exit('La cuenta Google no coincide con las carpetas del álbum. Sin cambios.')
-        except urllib.error.HTTPError as ex:
-            sys.exit('La cuenta autorizada no puede abrir las carpetas del álbum (HTTP '+str(ex.code)+'). Sin cambios.')
+        except RuntimeError as exc:
+            sys.exit('La cuenta autorizada no puede abrir las carpetas del álbum. Sin cambios. ' + str(exc))
     print('4. Guardando la credencial en Oracle, con respaldo y reinicio limitado al álbum...')
     payload={'old_hash':config['old_hash'],'new_refresh_token':new_refresh}
     result=ssh_run(REMOTE_UPDATE,json.dumps(payload))
