@@ -24,7 +24,11 @@ on:
       - "templates/gallery.html"
       - "static/gallery.css"
       - "tests/test_album_*.py"
+      - "tests/test_upload_guard.py"
+      - "tests/test_moderation.py"
       - "requirements-album.txt"
+      - "requirements.txt"
+      - "app.py"
       - "ops/deploy_album.sh"
       - ".github/workflows/album-tests.yml"
 

@@ -393,21 +393,104 @@
     refreshSendState();
   });
 
+  // Achica en el celular antes de subir: 2048 px de lado y JPEG 0,85.
+  // Una foto de varios MB pasa a mucho menos y sube más rápido con datos.
+  // Si el navegador no puede decodificarla (p. ej. algún HEIC), se manda el original.
+  const MAX_LADO = 2048;
+  async function achicar(file) {
+    if (!/^image\/(jpeg|png|webp|heic|heif)$/i.test(file.type) || !window.createImageBitmap) return file;
+    try {
+      const bmp = await createImageBitmap(file, { imageOrientation: 'from-image' });
+      const k = Math.min(1, MAX_LADO / Math.max(bmp.width, bmp.height));
+      if (k === 1 && file.size < 1.5 * 1024 * 1024) { bmp.close && bmp.close(); return file; }
+      const c = document.createElement('canvas');
+      c.width = Math.round(bmp.width * k); c.height = Math.round(bmp.height * k);
+      c.getContext('2d').drawImage(bmp, 0, 0, c.width, c.height);
+      bmp.close && bmp.close();
+      const blob = await new Promise(r => c.toBlob(r, 'image/jpeg', 0.85));
+      if (!blob || blob.size >= file.size) return file;
+      return new File([blob], file.name.replace(/\.[^.]+$/, '') + '.jpg', { type: 'image/jpeg' });
+    } catch (e) { return file; }
+  }
+
+  // Un pedido por foto, con 3 intentos. Si se corta la señal, lo ya enviado queda
+  // y sólo se reintenta lo que falló.
+  async function enviar(form, intentos = 3) {
+    let espera = 2000;
+    let ultimo = null;
+    for (let i = 1; i <= intentos; i++) {
+      try {
+        const ctl = new AbortController();
+        const t = setTimeout(() => ctl.abort(), 90000);
+        const res = await fetch('/api/upload', { method: 'POST', body: form, signal: ctl.signal });
+        clearTimeout(t);
+        const data = await res.json().catch(() => ({}));
+        if (res.ok && data.ok) {
+          const mandoFoto = typeof form.has === 'function' && form.has('photos');
+          if (mandoFoto && (!Array.isArray(data.saved) || data.saved.length === 0)) {
+            throw Object.assign(new Error('No se pudo guardar la foto'), { final: true });
+          }
+          return data;
+        }
+        // 400, 413 y 429 no se arreglan reintentando. El resto (servidor caído,
+        // sin red) se vuelve a intentar y, si sigue, se informa el fallo.
+        ultimo = Object.assign(new Error(data.error || 'error'), {
+          final: res.status === 400 || res.status === 413 || res.status === 429,
+        });
+        if (ultimo.final || i === intentos) throw ultimo;
+      } catch (e) {
+        ultimo = e;
+        if (e.final || i === intentos) throw e;
+      }
+      await new Promise(r => setTimeout(r, espera));
+      espera *= 2;
+    }
+    throw ultimo || new Error('error');
+  }
+
   sendBtn.addEventListener('click', async () => {
     if (sendBtn.disabled) return;
     sendBtn.disabled = true;
     status.className = 'status';
-    status.textContent = 'Enviando...';
-
-    const form = new FormData();
-    selected.forEach(f => form.append('photos', f));
-    form.append('nombre', nombreEl.value);
-    form.append('mensaje', mensajeEl.value);
-
+    const total = selected.length;
+    let ok = 0;
+    const fallidas = [];
+    let aviso = '';
+    // El saludo viaja una sola vez, con la primera foto que sí se guarda.
+    let saludoPendiente = true;
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: form });
-      const data = await res.json();
-      if (data.ok) {
+      for (let i = 0; i < total; i++) {
+        status.textContent = `Enviando ${i + 1} de ${total}…`;
+        const form = new FormData();
+        form.append('photos', await achicar(selected[i]));
+        if (saludoPendiente) {
+          form.append('nombre', nombreEl.value);
+          form.append('mensaje', mensajeEl.value);
+        }
+        try {
+          await enviar(form);
+          ok++;
+          saludoPendiente = false;
+        } catch (e) {
+          fallidas.push(selected[i]);
+          if (e && e.final && e.message && e.message !== 'error') aviso = e.message;
+        }
+      }
+      if (!total && mensajeEl.value.trim()) {
+        status.textContent = 'Enviando…';
+        const form = new FormData();
+        form.append('nombre', nombreEl.value);
+        form.append('mensaje', mensajeEl.value);
+        await enviar(form);
+        ok++;
+      }
+      if (fallidas.length) {
+        selected = fallidas;
+        status.className = 'status err';
+        status.textContent = aviso
+          ? `Se enviaron ${ok}. Faltan ${fallidas.length}. ${aviso}`
+          : `Se enviaron ${ok}. Faltan ${fallidas.length} · tocá Enviar para reintentar`;
+      } else {
         status.className = 'status ok';
         status.textContent = 'Listo · ya está en pantalla';
         selected = [];
@@ -415,13 +498,13 @@
         fileInput.value = '';
         mensajeEl.value = '';
         countEl.textContent = '0';
-        refreshWall();
-      } else {
-        throw new Error(data.error || 'error');
       }
+      refreshWall();
     } catch (e) {
       status.className = 'status err';
-      status.textContent = 'No se pudo enviar · probá de nuevo';
+      status.textContent = (e && e.final && e.message && e.message !== 'error')
+        ? e.message
+        : 'No se pudo enviar · probá de nuevo';
     }
     refreshSendState();
   });
