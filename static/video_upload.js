@@ -1,0 +1,210 @@
+// Subida de un video corto directo a Drive. El servidor solo abre la sesión.
+const VIDEO_MAX_BYTES = 104857600;
+const VIDEO_MAX_SECONDS = 60;
+const VIDEO_DURATION_GRACE = 0.05;
+const VIDEO_CHUNK = 8 * 1024 * 1024;
+const MIME_BY_EXT = {mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm"};
+const VIDEO_ERRORS = {
+  type: "Tiene que ser mp4, mov o webm",
+  size: "El video pesa más de 100 MB",
+  duration: "El video tiene que durar hasta 60 segundos",
+  unreadable: "No pudimos leer la duración · probá con otro"
+};
+const UPLOAD_FAILED = "No se pudo subir el video · probá de nuevo";
+
+function extensionOf(name) {
+  const text = String(name || "");
+  const dot = text.lastIndexOf(".");
+  return dot >= 0 ? text.slice(dot + 1).toLowerCase() : "";
+}
+
+function videoRejection(file, duration) {
+  const ext = extensionOf(file && file.name);
+  if (!MIME_BY_EXT[ext]) return VIDEO_ERRORS.type;
+  if (!file.size || file.size > VIDEO_MAX_BYTES) return VIDEO_ERRORS.size;
+  if (typeof duration !== "number" || !isFinite(duration) || duration <= 0) return VIDEO_ERRORS.unreadable;
+  if (duration > VIDEO_MAX_SECONDS + VIDEO_DURATION_GRACE) return VIDEO_ERRORS.duration;
+  return null;
+}
+
+function chunkEnd(offset, total, chunkSize) {
+  return Math.min(total - 1, offset + chunkSize - 1);
+}
+
+function resumeOffset(rangeHeader, fallback) {
+  const match = /bytes=\s*(\d+)\s*-\s*(\d+)/i.exec(rangeHeader || "");
+  if (!match) return fallback;
+  const next = Number(match[2]) + 1;
+  if (!isFinite(next) || next < 0) return fallback;
+  return next;
+}
+
+function safeMessage(value, fallback) {
+  if (typeof value !== "string") return fallback;
+  const text = value.trim();
+  if (!text || text.length > 180 || /[<>]/.test(text)) return fallback;
+  return text;
+}
+
+function xhrPut(url, body, headers, onBytes) {
+  return new Promise((resolve) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("PUT", url);
+    Object.keys(headers || {}).forEach((key) => {
+      if (headers[key] != null) xhr.setRequestHeader(key, headers[key]);
+    });
+    if (xhr.upload && onBytes) {
+      xhr.upload.onprogress = (event) => {
+        if (event.lengthComputable) onBytes(event.loaded);
+      };
+    }
+    xhr.onload = () => resolve({
+      status: xhr.status,
+      range: xhr.getResponseHeader("Range"),
+      text: xhr.responseText || ""
+    });
+    xhr.onerror = () => resolve({status: 0, range: null, text: ""});
+    xhr.onabort = () => resolve({status: 0, range: null, text: ""});
+    xhr.send(body == null ? null : body);
+  });
+}
+
+function readDuration(file) {
+  return new Promise((resolve, reject) => {
+    if (typeof document === "undefined") {
+      reject(new Error(VIDEO_ERRORS.unreadable));
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const el = document.createElement("video");
+    let settled = false;
+    const timer = setTimeout(() => finish(new Error(VIDEO_ERRORS.unreadable)), 8000);
+    function finish(error, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      el.onloadedmetadata = null;
+      el.onerror = null;
+      URL.revokeObjectURL(url);
+      el.removeAttribute("src");
+      try { el.load(); } catch (loadError) { /* el elemento ya no importa */ }
+      if (error) reject(error);
+      else resolve(value);
+    }
+    el.preload = "metadata";
+    el.muted = true;
+    el.playsInline = true;
+    el.onloadedmetadata = () => {
+      if (!isFinite(el.duration) || el.duration <= 0) finish(new Error(VIDEO_ERRORS.unreadable));
+      else finish(null, el.duration);
+    };
+    el.onerror = () => finish(new Error(VIDEO_ERRORS.unreadable));
+    el.src = url;
+  });
+}
+
+async function sendChunk(url, file, offset, end, total, putImpl, sleep, onRetry, onBytes) {
+  for (let attempt = 0; attempt < 4; attempt++) {
+    const response = await putImpl(url, file.slice(offset, end + 1), {
+      "Content-Range": `bytes ${offset}-${end}/${total}`
+    }, onBytes);
+    if (response.status === 200 || response.status === 201) return {done: true, offset: total};
+    if (response.status === 308) return {done: false, offset: resumeOffset(response.range, end + 1)};
+    if (response.status === 410 || response.status === 404) {
+      const expired = new Error(UPLOAD_FAILED);
+      expired.code = "restart";
+      throw expired;
+    }
+    if (response.status !== 0 && response.status < 500) throw new Error(UPLOAD_FAILED);
+    onRetry();
+    await sleep(500 * (attempt + 1));
+    const probe = await putImpl(url, null, {"Content-Range": `bytes */${total}`}, null);
+    if (probe.status === 200 || probe.status === 201) return {done: true, offset: total};
+    if (probe.status === 308 && probe.range) {
+      const next = resumeOffset(probe.range, offset);
+      if (next > offset) return {done: next >= total, offset: next};
+    }
+  }
+  throw new Error(UPLOAD_FAILED);
+}
+
+async function registerVideo(fetchImpl, uid, size, duration, sleep) {
+  let last = UPLOAD_FAILED;
+  for (let attempt = 0; attempt < 3; attempt++) {
+    if (attempt) await sleep(300 * attempt);
+    let response;
+    try {
+      response = await fetchImpl("/api/videos/register", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({uid, size, duration})
+      });
+    } catch (error) {
+      continue;
+    }
+    const data = await response.json().catch(() => ({}));
+    if (response.ok && data.ok) return;
+    last = safeMessage(data.error, UPLOAD_FAILED);
+    if (response.status !== 409 && response.status < 500) break;
+  }
+  throw new Error(last);
+}
+
+async function uploadOnce(file, duration, hooks) {
+  const chunkSize = hooks.chunkSize || VIDEO_CHUNK;
+  const fetchImpl = hooks.fetch || fetch;
+  const putImpl = hooks.put || xhrPut;
+  const sleep = hooks.sleep || (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const onProgress = hooks.onProgress || function () {};
+  const onRetry = hooks.onRetry || function () {};
+  const rejection = videoRejection(file, duration);
+  if (rejection) throw new Error(rejection);
+  const ext = extensionOf(file.name);
+  const sessionResponse = await fetchImpl("/api/videos/session", {
+    method: "POST",
+    headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({ext, size: file.size, mime: MIME_BY_EXT[ext], duration})
+  });
+  const session = await sessionResponse.json().catch(() => ({}));
+  if (!sessionResponse.ok || !session.ok || typeof session.uploadUrl !== "string" || !/^[0-9a-f]{32}$/.test(session.uid || "")) {
+    throw new Error(safeMessage(session.error, UPLOAD_FAILED));
+  }
+  if (!/^https:\/\/www\.googleapis\.com\/upload\/drive\//.test(session.uploadUrl)) {
+    throw new Error(UPLOAD_FAILED);
+  }
+  let offset = 0;
+  let guard = 0;
+  while (offset < file.size) {
+    if (++guard > 10000) throw new Error(UPLOAD_FAILED);
+    const end = chunkEnd(offset, file.size, chunkSize);
+    const sent = await sendChunk(session.uploadUrl, file, offset, end, file.size, putImpl, sleep, onRetry, (loaded) => {
+      onProgress(Math.min(file.size, offset + loaded), file.size);
+    });
+    if (sent.done || sent.offset >= file.size) {
+      offset = file.size;
+      break;
+    }
+    if (sent.offset <= offset) throw new Error(UPLOAD_FAILED);
+    offset = sent.offset;
+    onProgress(offset, file.size);
+  }
+  onProgress(file.size, file.size);
+  await registerVideo(fetchImpl, session.uid, file.size, duration, sleep);
+}
+
+async function uploadVideoFile(file, duration, hooks) {
+  hooks = hooks || {};
+  try {
+    await uploadOnce(file, duration, hooks);
+  } catch (error) {
+    if (!error || error.code !== "restart") throw error;
+    if (hooks.onRetry) hooks.onRetry();
+    await uploadOnce(file, duration, hooks);
+  }
+}
+
+const videoUploadApi = {
+  videoRejection, uploadVideoFile, readDuration, chunkEnd, resumeOffset,
+  VIDEO_MAX_BYTES, VIDEO_MAX_SECONDS, VIDEO_CHUNK, VIDEO_ERRORS, UPLOAD_FAILED, MIME_BY_EXT
+};
+if (typeof module !== "undefined" && module.exports) module.exports = videoUploadApi;

@@ -114,6 +114,8 @@
     text-transform:uppercase; letter-spacing:.16em; font-size:12px;
     color:rgba(240,233,219,.45);
   }
+  #videoBtn{ margin-top:14px; }
+  #videoHint{ margin-bottom:0; }
 
 
   /* ---- Destello para llamar la atención ----
@@ -264,7 +266,7 @@
     <p class="eyebrow">Muro de fotos en vivo</p>
     <h1>{{ marca.titulo }}</h1>
     <div class="hr"></div>
-    <p class="lead">Sumá tus fotos y dejá tu saludo. Aparecen en la pantalla de la fiesta.</p>
+    <p class="lead">Sumá tus fotos o un video corto, y dejá tu saludo. Aparecen en la pantalla de la fiesta.</p>
 
     <button type="button" class="pill" id="pickBtn">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7">
@@ -276,6 +278,10 @@
 
     <input type="file" id="fileInput" accept="image/*" multiple>
     <div class="preview" id="preview"></div>
+
+    <button type="button" class="pill ghost" id="videoBtn">Elegir video</button>
+    <input type="file" id="videoInput" accept="video/mp4,video/quicktime,video/webm,.mp4,.mov,.webm">
+    <p class="vivo-nota" id="videoHint">Hasta 60 segundos y 100 MB · mp4, mov o webm</p>
 
     <div class="divider">y / o</div>
 
@@ -340,6 +346,7 @@
     </div>
   </div>
 
+<script src="/static/video_upload.js"></script>
 <script>
   const pickBtn = document.getElementById('pickBtn');
   const fileInput = document.getElementById('fileInput');
@@ -350,11 +357,19 @@
   const mensajeEl = document.getElementById('mensaje');
   const countEl = document.getElementById('count');
   let selected = [];
+  let selectedVideo = null;
+  let readingVideo = false;
 
   function refreshSendState() {
-    sendBtn.disabled = selected.length === 0 && mensajeEl.value.trim() === '';
+    sendBtn.disabled = readingVideo || (selected.length === 0 && !selectedVideo && mensajeEl.value.trim() === '');
     // El brillo sólo cuando el botón realmente hace algo.
     sendBtn.classList.toggle('shine', !sendBtn.disabled);
+  }
+
+  function guestMessage(error) {
+    const text = error && error.message;
+    if (typeof text === 'string' && text.length <= 180 && !/TypeError|undefined|NetworkError/.test(text)) return text;
+    return 'No se pudo enviar · probá de nuevo';
   }
 
   pickBtn.addEventListener('click', () => fileInput.click());
@@ -371,6 +386,38 @@
     status.textContent = selected.length
       ? `${selected.length} foto${selected.length > 1 ? 's' : ''} lista${selected.length > 1 ? 's' : ''}`
       : '';
+    refreshSendState();
+  });
+
+  const videoBtn = document.getElementById('videoBtn');
+  const videoInput = document.getElementById('videoInput');
+  videoBtn.addEventListener('click', () => videoInput.click());
+  videoInput.addEventListener('change', async () => {
+    const file = videoInput.files && videoInput.files[0];
+    selectedVideo = null;
+    if (!file) {
+      refreshSendState();
+      return;
+    }
+    readingVideo = true;
+    refreshSendState();
+    status.className = 'status';
+    status.textContent = 'Leyendo el video…';
+    try {
+      const duration = await readDuration(file);
+      const error = videoRejection(file, duration);
+      if (error) throw new Error(error);
+      selectedVideo = {file, duration};
+      const mb = (file.size / (1024 * 1024)).toFixed(1);
+      status.className = 'status ok';
+      status.textContent = `${file.name} · ${Math.round(duration)} s · ${mb} MB`;
+    } catch (error) {
+      selectedVideo = null;
+      videoInput.value = '';
+      status.className = 'status err';
+      status.textContent = guestMessage(error);
+    }
+    readingVideo = false;
     refreshSendState();
   });
 
@@ -396,33 +443,62 @@
   sendBtn.addEventListener('click', async () => {
     if (sendBtn.disabled) return;
     sendBtn.disabled = true;
+    pickBtn.disabled = true;
+    videoBtn.disabled = true;
     status.className = 'status';
     status.textContent = 'Enviando...';
-
-    const form = new FormData();
-    selected.forEach(f => form.append('photos', f));
-    form.append('nombre', nombreEl.value);
-    form.append('mensaje', mensajeEl.value);
+    let videoOk = false;
 
     try {
-      const res = await fetch('/api/upload', { method: 'POST', body: form });
-      const data = await res.json();
-      if (data.ok) {
-        status.className = 'status ok';
-        status.textContent = 'Listo · ya está en pantalla';
+      if (selectedVideo) {
+        const pending = selectedVideo;
+        status.textContent = 'Subiendo video 0%';
+        await uploadVideoFile(pending.file, pending.duration, {
+          onProgress: (sent, total) => {
+            const pct = total ? Math.min(100, Math.round(sent / total * 100)) : 0;
+            status.textContent = `Subiendo video ${pct}%`;
+          },
+          onRetry: () => {
+            status.textContent = 'Se cortó la subida · reintentando';
+          }
+        });
+        videoOk = true;
+        selectedVideo = null;
+        videoInput.value = '';
+      }
+
+      const wantsPhotoOrGreeting = selected.length > 0 || mensajeEl.value.trim() !== '';
+      if (wantsPhotoOrGreeting) {
+        const form = new FormData();
+        selected.forEach(f => form.append('photos', f));
+        form.append('nombre', nombreEl.value);
+        form.append('mensaje', mensajeEl.value);
+        const res = await fetch('/api/upload', { method: 'POST', body: form });
+        let data = {};
+        try { data = await res.json(); } catch (parseError) { data = {}; }
+        if (!res.ok || !data.ok) {
+          if (videoOk) throw new Error('El video ya está · las fotos no se pudieron enviar');
+          throw new Error(data.error || 'error');
+        }
         selected = [];
         preview.innerHTML = '';
         fileInput.value = '';
         mensajeEl.value = '';
         countEl.textContent = '0';
+      }
+
+      if (videoOk || wantsPhotoOrGreeting) {
+        status.className = 'status ok';
+        status.textContent = 'Listo · ya está en pantalla';
         refreshWall();
-      } else {
-        throw new Error(data.error || 'error');
       }
     } catch (e) {
       status.className = 'status err';
-      status.textContent = 'No se pudo enviar · probá de nuevo';
+      status.textContent = guestMessage(e);
+      if (videoOk) refreshWall();
     }
+    pickBtn.disabled = false;
+    videoBtn.disabled = false;
     refreshSendState();
   });
   // Usa la misma lista y la misma ventana de retención que el loop de pantalla.

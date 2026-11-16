@@ -17,6 +17,7 @@ from typing import Optional
 from delivery import Delivery, parse_date, photo_uid
 from event_source import EventSource
 from gallery import Gallery, register_gallery
+import screen_videos
 
 from flask import Flask, g, request, jsonify, render_template, send_from_directory, abort, redirect
 from werkzeug.utils import secure_filename
@@ -394,7 +395,12 @@ def upload_page():
 
 @app.route("/loop")
 def loop_page():
-    return render_template("loop.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME), marca=MARCA)
+    return render_template(
+        "loop.html",
+        event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME),
+        marca=MARCA,
+        video_max_seconds=screen_videos.MAX_SECONDS,
+    )
 
 
 @app.route("/saludos")
@@ -438,20 +444,25 @@ def api_upload():
     return jsonify(ok=True, saved=saved, mensaje=mensaje_guardado, entrega_pendiente=bool(_delivery.last_error))
 
 
+def _visible_photo_files():
+    vetoes = _photo_vetoes()
+    corte = time.time() - RETENTION_SECONDS
+    files = [
+        p for p in CACHE_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() == ".jpg" and p.stat().st_mtime >= corte
+        and photo_uid(p.name) not in vetoes
+    ]
+    files.sort(key=lambda p: p.stat().st_mtime)
+    return files
+
+
 @app.route("/api/photos")
 def api_photos():
     with _event_lock:
         try:
-            vetoes = _photo_vetoes()
+            files = _visible_photo_files()
         except Exception:
             return jsonify(ok=False, photos=[], error="No se pudo verificar la moderación."), 503
-        corte = time.time() - RETENTION_SECONDS
-        files = [
-            p for p in CACHE_DIR.iterdir()
-            if p.is_file() and p.suffix.lower() == ".jpg" and p.stat().st_mtime >= corte
-            and photo_uid(p.name) not in vetoes
-        ]
-        files.sort(key=lambda p: p.stat().st_mtime)
         return jsonify(photos=[f"/photos/{p.name}" for p in files])
 
 
@@ -789,7 +800,7 @@ _event_source = EventSource(_delivery, _reset_event_runtime, close_runtime=_clos
 
 @app.before_request
 def isolate_eventphotos_event():
-    if request.path not in {"/api/upload", "/api/photos", "/api/mensajes", "/", "/loop", "/saludos"}:
+    if request.path not in {"/api/upload", "/api/photos", "/api/mensajes", "/", "/loop", "/saludos", *screen_videos.SCREEN_EVENT_PATHS}:
         return None
     _event_lock.acquire()
     g.eventphotos_lock = True
@@ -797,12 +808,16 @@ def isolate_eventphotos_event():
         with _event_lock:
             config = _event_source.ensure(load_messages())
             if not config:
-                if request.path == "/api/upload":
+                if request.path in {"/api/upload", "/api/videos/session", "/api/videos/register"}:
                     return jsonify(ok=False, error="Todavía no hay un evento de Abrolista en curso."), 409
                 if request.path == "/api/photos":
                     return jsonify(photos=[])
                 if request.path == "/api/mensajes":
                     return jsonify(mensajes=[])
+                if request.path == "/api/videos":
+                    return jsonify(videos=[])
+                if request.path == "/api/loop-items":
+                    return jsonify(items=[])
             else:
                 # El título se obtiene de Abrolista, sin editar variables de Render por evento.
                 app.config["CURRENT_EVENT_NAME"] = config["name"]
@@ -823,6 +838,51 @@ def _restore_serialized():
         _restore_from_drive()
 
 
+class _ScreenDeps:
+    def drive(self):
+        return _drive_service
+
+    def delivery(self):
+        return _delivery
+
+    def data_folder(self):
+        return get_subfolder("Datos")
+
+    def video_folder(self):
+        return get_subfolder(screen_videos.FOLDER_NAME)
+
+    def vetoes(self):
+        return _photo_vetoes()
+
+    def photo_items(self):
+        return [
+            {"kind": "photo", "src": f"/photos/{path.name}", "ts": path.stat().st_mtime}
+            for path in _visible_photo_files()
+        ]
+
+    def check_admin(self):
+        return _check_admin()
+
+    def cache_dir(self):
+        return CACHE_DIR
+
+    def retention(self):
+        return RETENTION_SECONDS
+
+    def config(self):
+        return _delivery.config
+
+    def drive_request(self, url, method, body, headers):
+        if _drive_service is None:
+            raise RuntimeError("No hay Drive para guardar el video.")
+        return screen_videos.drive_http(_drive_service, url, method, body, headers)
+
+    def read_range(self, file_id, start, end):
+        return screen_videos.read_drive_range(_drive_service, file_id, start, end)
+
+
+screen_videos.register_screen_videos(app, _ScreenDeps())
+
 threading.Thread(target=_restore_serialized, daemon=True).start()
 
 
@@ -831,7 +891,7 @@ if __name__ == "__main__":
     print(f"Subida (invitados): http://0.0.0.0:{PORT}/")
     print(f"Loop fotos (OBS):   http://0.0.0.0:{PORT}/loop")
     print(f"Saludos (VJ):       http://0.0.0.0:{PORT}/saludos")
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
 
 
 

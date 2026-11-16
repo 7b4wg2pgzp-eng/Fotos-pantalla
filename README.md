@@ -79,6 +79,48 @@ launchctl load ~/Library/LaunchAgents/com.nico.eventphotos.plist
 
 Para bajarlo: `launchctl unload ~/Library/LaunchAgents/com.nico.eventphotos.plist`
 
+## 6. Videos cortos
+
+En la página de subida, el invitado puede elegir un video de hasta 60 segundos
+y 100 MB (`mp4`, `mov` o `webm`). El celular lo manda directo a Drive con una
+sesión resumible: el servidor solo abre esa sesión y anota el video. Los
+bytes no pasan por gunicorn.
+
+En `/loop` se reproduce sin sonido, entero, con tope de 60 segundos, y
+después sigue la rotación de fotos. Entra con el mismo criterio que una foto:
+se ve enseguida y en `/admin` lo podés borrar. Si el navegador de la pantalla
+no lo puede reproducir (por ejemplo un `.mov` HEVC del iPhone), lo saltea y
+el archivo queda en Drive.
+
+Quedan en la carpeta `Videos pantalla`, al lado de `Originales`. No se mezclan
+con los videos del álbum ni con la limpieza de las fotos. No hace falta
+ninguna variable nueva: usa la misma conexión de Drive.
+
+El `Procfile` deja un solo proceso de gunicorn con 4 hilos y un timeout de
+120 segundos, para que la pantalla pueda estar pasando un video y al mismo
+tiempo entre una foto. En el plan gratuito de Render no subas la cantidad de
+procesos: la memoria es de 512 MB.
+
+### Transcodificar más adelante (VPS, no Render Free)
+
+`transcode_for_screen()` en `screen_videos.py` devuelve `None` a propósito.
+No bajes el video a Render para convertirlo: no entra en la memoria del plan
+gratuito y el disco se borra en cada reinicio. En un VPS con ffmpeg se puede
+dejar una copia H.264 720p, yuv420p, con `+faststart` y un poster, sin borrar
+el original:
+
+```bash
+ffmpeg -y -i entrada.mov -vf "scale=-2:720" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart salida.mp4
+ffmpeg -y -i salida.mp4 -ss 1 -frames:v 1 poster.jpg
+```
+
+Para probar en local, con Drive simulado:
+
+```bash
+python3 -m unittest tests.test_screen_videos -v
+node tests/test_video_upload.js
+```
+
 ## Notas técnicas
 
 - Todas las fotos se convierten a JPG, se corrige la rotación (EXIF) y se

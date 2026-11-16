@@ -28,6 +28,17 @@
     transition:opacity 1.5s ease;
   }
   .slide.active{ opacity:1; }
+  .clip{
+    position:absolute; inset:0;
+    width:100%; height:100%;
+    object-fit:contain;
+    background:transparent;
+    display:none;
+  }
+  .clip.playing{
+    display:block;
+    box-shadow:inset 0 0 0 12px rgba(217,164,65,.9);
+  }
   .vignette{
     position:absolute; inset:0;
     pointer-events:none;
@@ -51,56 +62,181 @@
 <body>
   <div class="stage" id="stage">
     <div class="empty" id="empty">Esperando fotos</div>
+    <video class="clip" id="clip" muted playsinline preload="none"></video>
     <div class="vignette"></div>
   </div>
 
 <script>
   const stage = document.getElementById('stage');
   const emptyMsg = document.getElementById('empty');
+  const clip = document.getElementById('clip');
   const HOLD_MS = 25000;
   const FETCH_EVERY_MS = 8000;
+  const VIDEO_CAP_S = {{ video_max_seconds }};
 
-  let photos = [];
+  let items = [];
   let index = 0;
   let slideEls = [];
+  let timer = null;
+  let playingVideo = false;
+  let currentKey = null;
+  let clipToken = 0;
+  let started = false;
+  const skipped = new Set();
 
-  async function refreshPhotos() {
-    try {
-      const res = await fetch('/api/photos', { cache: 'no-store' });
-      const data = await res.json();
-      if (JSON.stringify(data.photos) !== JSON.stringify(photos)) {
-        photos = data.photos;
-        rebuildSlides();
+  function itemKey(item) {
+    return item.kind + ':' + (item.uid || item.src);
+  }
+
+  function validItem(item) {
+    if (!item || typeof item.src !== 'string') return false;
+    if (item.kind === 'photo') return /^\/photos\/[0-9a-f]{32}\.jpg$/i.test(item.src);
+    return item.kind === 'video'
+      && /^[0-9a-f]{32}$/.test(item.uid || '')
+      && item.src === '/videos/' + item.uid
+      && typeof item.mime === 'string';
+  }
+
+  function schedule(ms) {
+    clearTimeout(timer);
+    timer = setTimeout(advance, ms);
+  }
+
+  function stopClip() {
+    clip.onended = null;
+    clip.onerror = null;
+    clip.ontimeupdate = null;
+    clip.onplaying = null;
+    clip.pause();
+    while (clip.firstChild) clip.removeChild(clip.firstChild);
+    clip.removeAttribute('src');
+    try { clip.load(); } catch (error) { /* el navegador ya soltó el video */ }
+    clip.classList.remove('playing');
+  }
+
+  function playClip(item) {
+    clearTimeout(timer);
+    const token = ++clipToken;
+    playingVideo = true;
+    currentKey = itemKey(item);
+    stopClip();
+    playingVideo = true;
+    // load() del corte anterior puede disparar un error en otro turno.
+    // Los handlers del video nuevo se enganchan después de ese turno.
+    setTimeout(() => {
+      if (token !== clipToken) return;
+      clip.muted = true;
+      clip.classList.add('playing');
+      const source = document.createElement('source');
+      source.src = item.src;
+      source.type = item.mime;
+      clip.appendChild(source);
+      let watchdog = setTimeout(() => finish('stall'), 45000);
+      function finish(reason) {
+        if (token !== clipToken) return;
+        clipToken += 1;
+        clearTimeout(watchdog);
+        playingVideo = false;
+        stopClip();
+        if (reason === 'decode') skipped.add(item.uid);
+        schedule(reason === 'ended' || reason === 'cap' ? 600 : HOLD_MS);
       }
-    } catch (e) { /* silencioso */ }
+      clip.onended = () => finish('ended');
+      clip.onerror = () => {
+        const code = clip.error ? clip.error.code : 0;
+        finish(code === 3 || code === 4 ? 'decode' : 'stall');
+      };
+      clip.ontimeupdate = () => {
+        if (clip.currentTime >= VIDEO_CAP_S) finish('cap');
+      };
+      clip.onplaying = () => clearTimeout(watchdog);
+      clip.load();
+      const pending = clip.play();
+      if (pending && pending.catch) pending.catch(() => finish('stall'));
+    }, 0);
+  }
+
+  function showItem(item) {
+    currentKey = itemKey(item);
+    emptyMsg.style.display = 'none';
+    if (item.kind === 'video') {
+      slideEls.forEach(el => el.classList.remove('active'));
+      playClip(item);
+      return;
+    }
+    clipToken += 1;
+    playingVideo = false;
+    stopClip();
+    slideEls.forEach(el => el.classList.remove('active'));
+    const el = slideEls.find(slide => slide.dataset.src === item.src);
+    if (!el) {
+      schedule(HOLD_MS);
+      return;
+    }
+    void el.offsetWidth;
+    el.classList.add('active');
+    schedule(HOLD_MS);
+  }
+
+  function advance() {
+    const playable = items.filter(item => item.kind !== 'video' || !skipped.has(item.uid));
+    if (!playable.length) {
+      emptyMsg.style.display = 'flex';
+      schedule(HOLD_MS);
+      return;
+    }
+    if (index >= playable.length) index = 0;
+    const item = playable[index];
+    index = (index + 1) % playable.length;
+    showItem(item);
   }
 
   function rebuildSlides() {
     slideEls.forEach(el => el.remove());
-    const vignette = stage.querySelector('.vignette');
-    slideEls = photos.map(src => {
+    const photos = items.filter(item => item.kind === 'photo');
+    slideEls = photos.map(item => {
       const el = document.createElement('div');
       el.className = 'slide';
-      el.style.backgroundImage = `url("${src}")`;
-      stage.insertBefore(el, vignette);
+      el.dataset.src = item.src;
+      el.style.backgroundImage = `url("${item.src}")`;
+      stage.insertBefore(el, clip);
       return el;
     });
-    emptyMsg.style.display = photos.length ? 'none' : 'flex';
-    index = Math.min(index, Math.max(photos.length - 1, 0));
+    emptyMsg.style.display = items.length ? 'none' : 'flex';
   }
 
-  function showNext() {
-    if (!slideEls.length) return;
-    slideEls.forEach(el => el.classList.remove('active'));
-    const el = slideEls[index];
-    void el.offsetWidth;
-    el.classList.add('active');
-    index = (index + 1) % slideEls.length;
+  async function refreshItems() {
+    try {
+      const res = await fetch('/api/loop-items', { cache: 'no-store' });
+      const data = await res.json();
+      if (!Array.isArray(data.items)) return;
+      const next = data.items.filter(validItem).filter(item => item.kind !== 'video' || !skipped.has(item.uid));
+      if (JSON.stringify(next) === JSON.stringify(items)) return;
+      const key = currentKey;
+      items = next;
+      rebuildSlides();
+      if (playingVideo && key && !items.some(item => itemKey(item) === key)) {
+        clipToken += 1;
+        playingVideo = false;
+        stopClip();
+        index = 0;
+        schedule(0);
+        return;
+      }
+      if (key) {
+        const at = items.findIndex(item => itemKey(item) === key);
+        if (at >= 0) index = (at + 1) % items.length;
+      }
+      if (!started && items.length && !playingVideo) {
+        started = true;
+        schedule(0);
+      }
+    } catch (e) { /* silencioso */ }
   }
 
-  refreshPhotos();
-  setInterval(refreshPhotos, FETCH_EVERY_MS);
-  setInterval(showNext, HOLD_MS);
+  refreshItems();
+  setInterval(refreshItems, FETCH_EVERY_MS);
+  schedule(HOLD_MS);
 </script>
 </body>
 </html>
