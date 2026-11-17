@@ -560,7 +560,7 @@ def register_screen_videos(app, injected):
             duration = parse_duration(payload.get("duration"))
             nombre = clean_guest_text(payload.get("nombre"), NAME_LIMIT)
             saludo = clean_guest_text(payload.get("saludo"), GREETING_LIMIT)
-            register_upload(uid, size, duration, nombre, saludo)
+            row = register_upload(uid, size, duration, nombre, saludo)
         except LookupError:
             return jsonify(ok=False, error="El video todavía no está en Drive. Reintentá."), 409
         except ValueError:
@@ -568,6 +568,12 @@ def register_screen_videos(app, injected):
         except Exception:
             traceback.print_exc()
             return jsonify(ok=False, error="No se pudo registrar el video."), 503
+        try:
+            deps.deliver_video(row["file_id"])
+        except Exception:
+            # El loop ya tiene el video. La copia al álbum se reintenta al cerrar la fiesta.
+            traceback.print_exc()
+            print("[video] copia al álbum pendiente; el original sigue en Videos pantalla.")
         return jsonify(ok=True)
 
     @app.route("/api/videos")

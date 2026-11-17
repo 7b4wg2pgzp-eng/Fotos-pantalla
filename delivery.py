@@ -10,6 +10,11 @@ from zoneinfo import ZoneInfo
 TZ = ZoneInfo('America/Argentina/Mendoza')
 FOLDER = 'application/vnd.google-apps.folder'
 FIELDS = 'id,name,mimeType,createdTime,size,md5Checksum,appProperties,webViewLink'
+# Los videos del loop viven aparte de Originales. La limpieza de fotos no los toca.
+GUEST_VIDEO_FOLDER = 'Videos pantalla'
+ALBUM_VIDEO_FOLDER = 'Videos'
+GUEST_VIDEO_MIMES = {'video/mp4', 'video/quicktime', 'video/webm'}
+GUEST_VIDEO_EXTS = {'video/mp4': 'mp4', 'video/quicktime': 'mov', 'video/webm': 'webm'}
 
 
 def photo_uid(name):
@@ -234,6 +239,72 @@ class Delivery:
             return None
         return event, copied
 
+    def copy_guest_video(self, source, config):
+        """Copia un video de invitado a la carpeta Videos del álbum. No borra el original."""
+        self.require_drive()
+        if source.get('mimeType') not in GUEST_VIDEO_MIMES:
+            return None
+        if self.is_vetoed(source):
+            return None
+        if not source.get('md5Checksum') or not source.get('size'):
+            raise RuntimeError('El video no permite verificar su integridad.')
+        if not self.accepts(parse_date(source['createdTime']).timestamp(), config):
+            return None
+        event, _photos = self.folders(config, True)
+        videos = self.find_folder(event['id'], ALBUM_VIDEO_FOLDER, create=True)
+        marker = f"appProperties has {{ key='sourceFileId' and value='{escaped(source['id'])}' }}"
+        existing = self.list_files(videos['id'], marker)
+        if len(existing) > 1:
+            raise RuntimeError('La entrega contiene un video duplicado.')
+        if existing:
+            copied = existing[0]
+        else:
+            stamp = parse_date(source['createdTime']).astimezone(TZ).strftime('%Y-%m-%d %H.%M.%S')
+            suffix = source['name'].rsplit('.', 1)[-1].lower()
+            if suffix not in {'mp4', 'mov', 'webm'}:
+                suffix = GUEST_VIDEO_EXTS[source['mimeType']]
+            token = hashlib.sha256(source['id'].encode()).hexdigest()[:10]
+            uid = photo_uid(source['name']) or ''
+            props = dict(sourceFileId=source['id'], deliveryEvent=config['identity'], kind='guestScreenVideo')
+            if uid:
+                props['screenUid'] = uid
+            copied = self.service.files().copy(
+                fileId=source['id'],
+                body=dict(name=f'Video {stamp} - {token}.{suffix}', parents=[videos['id']], appProperties=props),
+                fields=FIELDS,
+            ).execute()
+        if copied.get('md5Checksum') != source['md5Checksum'] or str(copied.get('size')) != str(source.get('size')):
+            raise RuntimeError('La copia del video no coincide con el original; entrega pendiente.')
+        if copied.get('mimeType') not in GUEST_VIDEO_MIMES:
+            raise RuntimeError('La copia del video no quedó reproducible.')
+        if self.is_vetoed(source):
+            self.service.files().delete(fileId=copied['id']).execute()
+            return None
+        return event, copied
+
+    def copy_guest_videos(self, config):
+        """Reintenta las copias que faltan. No exige que ya estén para limpiar las fotos."""
+        folder = self.find_folder(self.root, GUEST_VIDEO_FOLDER)
+        if not folder:
+            return 0
+        copied = 0
+        for source in self.list_files(folder['id']):
+            if source.get('mimeType') not in GUEST_VIDEO_MIMES:
+                continue
+            if self.copy_guest_video(source, config):
+                copied += 1
+        return copied
+
+    def on_guest_video(self, source_id):
+        with self.lock:
+            if any(source_id in ids for ids in self.vetoes().values()):
+                return
+            config = self.load_config()
+            if not config or not config['enabled']:
+                return
+            source = self.service.files().get(fileId=source_id, fields=FIELDS).execute()
+            self.copy_guest_video(source, config)
+
     def verified_event_originals(self, config):
         """Build a deletion plan only when every event original has an identical delivery copy."""
         originals = self.find_folder(self.root, 'Originales')
@@ -328,6 +399,8 @@ class Delivery:
             for source in selected:
                 if self.copy_photo(source, config):
                     verified += 1
+            # Los videos de invitados se copian aparte. Si falta uno, no se borran las fotos.
+            self.copy_guest_videos(config)
             self.on_messages(messages)
             event, _ = self.folders(config)
             self.last_error = None

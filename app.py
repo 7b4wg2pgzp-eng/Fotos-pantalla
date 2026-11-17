@@ -221,6 +221,8 @@ def _update_delivery(kind, value):
     try:
         if kind == "photo":
             _delivery.on_photo(value)
+        elif kind == "video":
+            _delivery.on_guest_video(value)
         else:
             _delivery.on_messages(value)
     except Exception:
@@ -936,6 +938,9 @@ class _ScreenDeps:
 
     def read_range(self, file_id, start, end):
         return screen_videos.read_drive_range(_drive_service, file_id, start, end)
+
+    def deliver_video(self, file_id):
+        _update_delivery("video", file_id)
 
 
 screen_videos.register_screen_videos(app, _ScreenDeps())

@@ -152,9 +152,13 @@ class Gallery:
         folder_key=hashlib.sha256(('videos:'+manifest['event_folder']).encode()).hexdigest()
         with self.media.process_lock(folder_key):
             folder=self.delivery.find_folder(manifest['event_folder'],VIDEO_FOLDER,create=True)
-        return self.unique_media([f for f in self.delivery.list_files(folder['id'])
-                       if f.get('mimeType') in VIDEO_MIMES and
-                       f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity'])])
+        files=self.delivery.list_files(folder['id'])
+        vetoes=self.delivery.vetoes()
+        visible=[f for f in files
+                 if f.get('mimeType') in VIDEO_MIMES and
+                 f.get('appProperties',{}).get('deliveryEvent') in (None,manifest['identity']) and
+                 not self.delivery.is_vetoed(f, vetoes)]
+        return self.unique_media(visible)
 
     def greetings(self,manifest):
         if not manifest.get('event_folder'):return []

@@ -110,6 +110,24 @@ Quedan en la carpeta `Videos pantalla`, al lado de `Originales`. No se mezclan
 con los videos del álbum ni con la limpieza de las fotos. La subida usa la
 misma conexión de Drive. Antes de unir, cargá `VJ_OUTPUT_TOKEN` en Render.
 
+Al registrarse, el video también se copia a `Entregas/<fiesta>/Videos`, que es
+la carpeta que el álbum del cliente ya muestra, reproduce por rangos y mete en
+el ZIP. Si el VJ lo borra, la copia se saca y no entra al álbum. La limpieza
+de `Originales` no mira `Videos pantalla` y no espera esa copia para borrar las
+fotos.
+
+El álbum lo sirve otro proceso, `abrolista-album.service`, en la VM de Oracle.
+No hace falta una variable nueva. Para que un video borrado no aparezca aunque
+Drive no haya terminado de eliminarlo, hay que publicar esta revisión en esa
+VM (no se hace sola con Render):
+
+```bash
+sudo bash ops/deploy_album.sh SHA_COMPLETO_DE_40_CARACTERES
+```
+
+Ese script baja el SHA, corre las pruebas del álbum y reinicia el servicio.
+Si falla, vuelve a la versión anterior. No toca `/etc/abrolista-album.env`.
+
 El `Procfile` deja un solo proceso de gunicorn con 4 hilos y un timeout de
 120 segundos. Hace falta: el worker por defecto es síncrono y corta a los 30
 segundos, así que un video de hasta 60 segundos dejaría trabada la única

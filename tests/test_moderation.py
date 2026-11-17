@@ -133,8 +133,9 @@ class FakeDrive:
         return Request(execute)
 
     def copy(self, fileId, body, fields=None):
+        source = self.rows[fileId]
         return Request(lambda: self.add('copy-' + str(len(self.rows)), body['name'],
-                                        body['parents'][0], props=body['appProperties'], data=self.data[fileId]))
+                                        body['parents'][0], source['mimeType'], body.get('appProperties'), self.data[fileId]))
 
 
 class ModerationTests(unittest.TestCase):
