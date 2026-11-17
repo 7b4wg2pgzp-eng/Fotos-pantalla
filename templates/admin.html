@@ -40,6 +40,10 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 <p>Las fotos para pantalla siguen disponibles durante 12 horas. La entrega conserva sus copias después de ese plazo. Al comenzar una fiesta nueva, se limpia la pantalla y se reinician los saludos. Los originales y las entregas anteriores se conservan. Compartí únicamente la carpeta de esa fiesta desde Drive.</p>
 </section>
 <h2>Videos en pantalla</h2>
+<form method="post" action="/admin/videos">
+  <input type="hidden" name="key" id="videosKey">
+  <button type="submit">Abrir control del VJ</button>
+</form>
 <p class="vacio">Salen en la pantalla igual que las fotos, y los podés borrar. Si el navegador no reproduce uno (por ejemplo un MOV del iPhone), la pantalla lo saltea y el archivo queda en Drive.</p>
 <div id="pendingVideoDeletes" role="status" aria-live="polite"></div>
 <div id="videos"></div>
@@ -59,6 +63,7 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 
 <script>
 const KEY = {{ admin_key|tojson }};
+document.getElementById('videosKey').value = KEY;
 const deliveryStatus = document.getElementById('deliveryStatus');
 const deliveryLink = document.getElementById('deliveryLink');
 const deliveryButton = document.getElementById('reconcileDelivery');

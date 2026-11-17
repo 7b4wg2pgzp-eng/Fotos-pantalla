@@ -11,6 +11,7 @@ porque las fotos tampoco la tienen.
 Transcodificar (H.264 720p, faststart, poster) no entra en Render Free.
 transcode_for_screen() es el gancho para hacerlo después en un VPS.
 """
+import hmac
 import json
 import re
 import threading
@@ -37,10 +38,16 @@ SCREEN_EVENT_PATHS = {
     "/api/videos/register",
     "/api/videos",
     "/api/loop-items",
+    "/api/admin/videos",
+    "/api/admin/vj",
 }
 UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
 _lock = threading.RLock()
+_vj_lock = threading.RLock()
+_vj = {"mode": "stop", "uid": None, "mime": None, "rev": 0}
 deps = None
+NAME_LIMIT = 40
+GREETING_LIMIT = 280
 
 
 def transcode_for_screen(record, drive):
@@ -209,7 +216,7 @@ def load_rows():
     rows = []
     for row in data["videos"]:
         if _valid_row(row):
-            rows.append(row)
+            rows.append(_present(row))
         else:
             print("[video] fila ignorada en el registro")
     return rows
@@ -248,6 +255,22 @@ def visible_videos():
         return rows
 
 
+def clean_guest_text(value, limit):
+    if not isinstance(value, str):
+        return ""
+    text = " ".join(value.split())
+    if "<" in text or ">" in text:
+        return ""
+    return text[:limit]
+
+
+def _present(row):
+    row["nombre"] = clean_guest_text(row.get("nombre"), NAME_LIMIT)
+    row["saludo"] = clean_guest_text(row.get("saludo"), GREETING_LIMIT)
+    row["seen"] = row.get("seen") is True
+    return row
+
+
 def public_video(row):
     return {
         "uid": row["uid"],
@@ -257,6 +280,9 @@ def public_video(row):
         "duration": row["duration"],
         "ts": row["ts"],
         "playable": row["playable"],
+        "nombre": row.get("nombre") or "",
+        "saludo": row.get("saludo") or "",
+        "seen": row.get("seen") is True,
     }
 
 
@@ -311,7 +337,7 @@ def create_session(ext, size, duration):
     return {"ok": True, "uid": uid, "uploadUrl": upload_url}
 
 
-def register_upload(uid, size, duration):
+def register_upload(uid, size, duration, nombre="", saludo=""):
     if not re.fullmatch(r"[0-9a-f]{32}", uid or ""):
         raise ValueError("video")
     if deps.drive() is None:
@@ -358,6 +384,9 @@ def register_upload(uid, size, duration):
             "duration": duration,
             "ts": round(time.time(), 3),
             "playable": True,
+            "nombre": clean_guest_text(nombre, NAME_LIMIT),
+            "saludo": clean_guest_text(saludo, GREETING_LIMIT),
+            "seen": False,
         }
         # None = publicar el original. Una copia transcodificada se rechaza hasta
         # que un VPS enseñe a esta función a guardarla sin borrar el original.
@@ -397,7 +426,85 @@ def delete_video(uid):
         delivery.save_veto(uid, ids)
         result = delivery.moderate_photo(uid)
         save_rows([row for row in rows if row["uid"] != uid])
+        vj_stop_if(uid)
         return result
+
+
+def reset_vj_state():
+    with _vj_lock:
+        _vj["mode"] = "stop"
+        _vj["uid"] = None
+        _vj["mime"] = None
+        _vj["rev"] = 0
+
+
+def vj_public_status():
+    with _vj_lock:
+        return {
+            "rev": _vj["rev"],
+            "mode": _vj["mode"],
+            "uid": _vj["uid"],
+            "mime": _vj["mime"],
+        }
+
+
+def _vj_set(mode, uid=None, mime=None):
+    with _vj_lock:
+        _vj["mode"] = mode
+        _vj["uid"] = uid
+        _vj["mime"] = mime
+        _vj["rev"] += 1
+        return vj_public_status()
+
+
+def vj_stop():
+    return _vj_set("stop")
+
+
+def vj_stop_if(uid):
+    with _vj_lock:
+        if _vj["uid"] == uid:
+            _vj["mode"] = "stop"
+            _vj["uid"] = None
+            _vj["mime"] = None
+            _vj["rev"] += 1
+
+
+def vj_launch(uid, loop):
+    if not re.fullmatch(r"[0-9a-f]{32}", uid or ""):
+        raise ValueError("video")
+    row = next((item for item in visible_videos() if item["uid"] == uid), None)
+    if not row:
+        raise LookupError("video")
+    return _vj_set("loop" if loop else "once", uid, row["mime"])
+
+
+def mark_seen(uid):
+    if not re.fullmatch(r"[0-9a-f]{32}", uid or ""):
+        raise ValueError("video")
+    with _lock:
+        rows = load_rows()
+        current = next((row for row in rows if row["uid"] == uid), None)
+        if not current:
+            raise LookupError("video")
+        current["seen"] = True
+        save_rows(rows)
+        return public_video(current)
+
+
+def output_token():
+    import os
+    return os.environ.get("VJ_OUTPUT_TOKEN", "").strip()
+
+
+def output_authorized(provided):
+    expected = output_token()
+    if not expected or not isinstance(provided, str) or not provided:
+        return False
+    try:
+        return hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8"))
+    except Exception:
+        return False
 
 
 def _playback_row(uid):
@@ -431,9 +538,9 @@ def register_screen_videos(app, injected):
         except ValueError as error:
             reason = str(error)
             if reason == "tamaño":
-                message = "El video pesa más de 100 MB."
+                message = "Ese video pesa más de 100 MB. Probá con uno más corto."
             elif reason == "duración":
-                message = "El video tiene que durar hasta 60 segundos."
+                message = "Ese video dura más de 60 segundos. Recortalo y probalo de nuevo."
             else:
                 message = "Tiene que ser mp4, mov o webm."
             return jsonify(ok=False, error=message), 400
@@ -451,7 +558,9 @@ def register_screen_videos(app, injected):
             uid = str(payload.get("uid") or "")
             size = parse_size(payload.get("size"))
             duration = parse_duration(payload.get("duration"))
-            register_upload(uid, size, duration)
+            nombre = clean_guest_text(payload.get("nombre"), NAME_LIMIT)
+            saludo = clean_guest_text(payload.get("saludo"), GREETING_LIMIT)
+            register_upload(uid, size, duration, nombre, saludo)
         except LookupError:
             return jsonify(ok=False, error="El video todavía no está en Drive. Reintentá."), 409
         except ValueError:
@@ -478,6 +587,44 @@ def register_screen_videos(app, injected):
             traceback.print_exc()
             return jsonify(ok=False, items=[], error="No se pudo verificar la moderación."), 503
         return jsonify(items=items)
+
+    @app.route("/api/admin/videos")
+    def admin_video_list():
+        if not deps.check_admin():
+            return jsonify(ok=False), 403
+        try:
+            rows = [public_video(row) for row in visible_videos()]
+        except Exception:
+            traceback.print_exc()
+            return jsonify(ok=False, videos=[], error="No se pudo verificar la moderación."), 503
+        rows.sort(key=lambda row: row["ts"], reverse=True)
+        return jsonify(videos=rows, estado=vj_public_status())
+
+    @app.route("/api/admin/vj", methods=["POST"])
+    def admin_vj():
+        if not deps.check_admin():
+            return jsonify(ok=False), 403
+        action = request.form.get("action", "")
+        uid = request.form.get("uid", "")
+        try:
+            if action == "parar":
+                vj_stop()
+            elif action == "lanzar":
+                vj_launch(uid, loop=False)
+            elif action == "repetir":
+                vj_launch(uid, loop=True)
+            elif action == "visto":
+                mark_seen(uid)
+            else:
+                return jsonify(ok=False), 400
+        except LookupError:
+            return jsonify(ok=False), 404
+        except ValueError:
+            return jsonify(ok=False), 400
+        except Exception:
+            traceback.print_exc()
+            return jsonify(ok=False), 503
+        return jsonify(ok=True, estado=vj_public_status())
 
     @app.route("/api/admin/borrar-video", methods=["POST"])
     def video_delete():
@@ -514,6 +661,8 @@ def register_screen_videos(app, injected):
         }
         if partial:
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
+        if request.args.get("descarga") == "1":
+            headers["Content-Disposition"] = f'attachment; filename="{row["name"]}"'
         if request.method == "HEAD":
             return Response(status=206 if partial else 200, mimetype=row["mime"], headers=headers)
 

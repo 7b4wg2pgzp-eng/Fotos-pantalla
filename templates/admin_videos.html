@@ -1,0 +1,176 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>Videos · VJ</title>
+<style>
+body{margin:0;padding:20px;background:#150F1F;color:#F5F0FA;font-family:system-ui,sans-serif;}
+h1{font-size:22px;margin:0 0 8px;color:#E8C468;}
+p{color:#c9bfd3;line-height:1.45;}
+a{color:#E8C468;}
+.salida{padding:14px;border:1px solid #e8c46855;border-radius:12px;background:#ffffff08;overflow-wrap:anywhere;}
+.salida code{color:#F5F0FA;}
+.card{display:grid;grid-template-columns:minmax(180px,320px) 1fr;gap:14px;padding:14px;margin:12px 0;background:#ffffff08;border-radius:14px;}
+video{width:100%;max-height:200px;background:#000;border-radius:10px;}
+.meta{font-size:14px;color:#c9bfd3;}
+.saludo{font-size:16px;margin:0 0 6px;}
+.hora{color:#E8C468;}
+.botones{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px;}
+button,a.bajar{border:none;border-radius:8px;padding:8px 12px;cursor:pointer;text-decoration:none;font:inherit;font-size:14px;}
+.lanzar{background:#E8C468;color:#211727;}
+.parar{background:#ffffff14;color:#F5F0FA;}
+.visto{background:#ffffff14;color:#F5F0FA;}
+.borrar{background:rgba(220,30,60,.92);color:#fff;}
+a.bajar{background:#ffffff14;color:#E8C468;}
+.en-aire{font-size:13px;color:#E8C468;}
+.vacio{color:#9384AC;}
+@media(max-width:700px){.card{grid-template-columns:1fr;}}
+</style>
+</head>
+<body>
+<h1>Videos para el VJ</h1>
+<p>Del más nuevo al más viejo. Lanzar y repetir salen en la página de salida, no cambian el loop de fotos.</p>
+{% if salida %}
+<div class="salida">
+  <div>Página de salida</div>
+  <code id="salidaUrl">{{ salida }}</code>
+  <p>Para el sonido agregá <code>&amp;audio=1</code>. Para el marco dorado agregá <code>&amp;marco=1</code>. Sin esos parámetros arranca en mudo y sin marco.</p>
+</div>
+{% else %}
+<p class="vacio">La salida está cerrada. Cargá VJ_OUTPUT_TOKEN en el entorno y volvé a abrir esta página.</p>
+{% endif %}
+<p class="en-aire" id="aire"></p>
+<div id="lista"></div>
+<script>
+const KEY = {{ admin_key|tojson }};
+const lista = document.getElementById('lista');
+const aire = document.getElementById('aire');
+
+function hora(ts) {
+  const date = new Date(Number(ts) * 1000);
+  if (!isFinite(date.getTime())) return '';
+  return date.toLocaleString('es-AR', {
+    timeZone: 'America/Argentina/Mendoza',
+    day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit'
+  });
+}
+
+function texto(video) {
+  const saludo = (video.saludo || '').trim();
+  const nombre = (video.nombre || '').trim();
+  if (saludo && nombre) return saludo + ' — ' + nombre;
+  return saludo || nombre || 'Sin saludo';
+}
+
+async function accion(action, uid) {
+  const body = new FormData();
+  body.set('action', action);
+  if (uid) body.set('uid', uid);
+  const res = await fetch('/api/admin/vj', {method: 'POST', body, headers: {'X-Admin-Key': KEY}});
+  if (!res.ok) {
+    alert('No se pudo hacer. Volvé a intentar.');
+    return;
+  }
+  cargar();
+}
+
+async function borrar(uid) {
+  if (!confirm('Borrar definitivamente?')) return;
+  const body = new FormData();
+  body.set('uid', uid);
+  const res = await fetch('/api/admin/borrar-video', {method: 'POST', body, headers: {'X-Admin-Key': KEY}});
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok || !data.ok) {
+    alert(data.error || 'No se completó la eliminación. Volvé a intentar.');
+    return;
+  }
+  cargar();
+}
+
+function fila(video, estado) {
+  const card = document.createElement('article');
+  card.className = 'card';
+  const preview = document.createElement('video');
+  preview.muted = true;
+  preview.playsInline = true;
+  preview.controls = true;
+  preview.preload = 'metadata';
+  preview.src = '/videos/' + video.uid;
+  const info = document.createElement('div');
+  const saludo = document.createElement('p');
+  saludo.className = 'saludo';
+  saludo.textContent = texto(video);
+  const meta = document.createElement('div');
+  meta.className = 'meta';
+  const segundos = Math.max(0, Math.round(Number(video.duration) || 0));
+  meta.textContent = segundos + ' s · ' + hora(video.ts) + (video.seen ? ' · visto' : '');
+  if (estado && estado.uid === video.uid && estado.mode !== 'stop') {
+    const marca = document.createElement('div');
+    marca.className = 'en-aire';
+    marca.textContent = estado.mode === 'loop' ? 'En el aire, en loop' : 'En el aire';
+    info.append(saludo, meta, marca);
+  } else {
+    info.append(saludo, meta);
+  }
+  const botones = document.createElement('div');
+  botones.className = 'botones';
+  const lanzar = document.createElement('button');
+  lanzar.className = 'lanzar';
+  lanzar.textContent = 'Lanzar';
+  lanzar.onclick = () => accion('lanzar', video.uid);
+  const parar = document.createElement('button');
+  parar.className = 'parar';
+  parar.textContent = 'Parar';
+  parar.onclick = () => accion('parar', video.uid);
+  const repetir = document.createElement('button');
+  repetir.className = 'parar';
+  repetir.textContent = 'Repetir';
+  repetir.onclick = () => accion('repetir', video.uid);
+  const visto = document.createElement('button');
+  visto.className = 'visto';
+  visto.textContent = video.seen ? 'Visto' : 'Marcar visto';
+  visto.disabled = !!video.seen;
+  visto.onclick = () => accion('visto', video.uid);
+  const bajar = document.createElement('a');
+  bajar.className = 'bajar';
+  bajar.textContent = 'Descargar original';
+  bajar.href = '/videos/' + video.uid + '?descarga=1';
+  const borrarBtn = document.createElement('button');
+  borrarBtn.className = 'borrar';
+  borrarBtn.textContent = 'Borrar';
+  borrarBtn.onclick = () => borrar(video.uid);
+  botones.append(lanzar, parar, repetir, visto, bajar, borrarBtn);
+  info.append(botones);
+  card.append(preview, info);
+  return card;
+}
+
+async function cargar() {
+  const res = await fetch('/api/admin/videos', {cache: 'no-store', headers: {'X-Admin-Key': KEY}});
+  if (!res.ok) return;
+  const data = await res.json();
+  const videos = Array.isArray(data.videos) ? data.videos : [];
+  const estado = data.estado || {};
+  aire.textContent = estado.mode && estado.mode !== 'stop' && estado.uid
+    ? 'Salida: ' + (estado.mode === 'loop' ? 'loop' : 'una vez')
+    : 'Salida en negro';
+  lista.replaceChildren();
+  if (!videos.length) {
+    const vacio = document.createElement('p');
+    vacio.className = 'vacio';
+    vacio.textContent = 'Sin videos.';
+    lista.append(vacio);
+    return;
+  }
+  videos.forEach((video) => {
+    if (!/^[0-9a-f]{32}$/.test(video.uid || '')) return;
+    lista.append(fila(video, estado));
+  });
+}
+cargar();
+setInterval(cargar, 8000);
+</script>
+</body>
+</html>

@@ -87,19 +87,36 @@ sesión resumible: el servidor solo abre esa sesión y anota el video. Los
 bytes no pasan por gunicorn.
 
 En `/loop` se reproduce sin sonido, entero, con tope de 60 segundos, y
-después sigue la rotación de fotos. Entra con el mismo criterio que una foto:
-se ve enseguida y en `/admin` lo podés borrar. Si el navegador de la pantalla
-no lo puede reproducir (por ejemplo un `.mov` HEVC del iPhone), lo saltea y
-el archivo queda en Drive.
+después sigue la rotación de fotos. El loop de fotos y el de saludos no
+cambian: el video es un turno más. Entra con el mismo criterio que una foto:
+se ve enseguida. Si el navegador de la pantalla no lo puede reproducir (por
+ejemplo un `.mov` HEVC del iPhone), lo saltea y el archivo queda en Drive.
+
+El marco del video es el mismo de las fotos: borde sólido `rgb(232, 196, 104)`,
+con un grosor de 10 px o el 1,2 % del lado mayor, el que sea más grande. El
+video más el marco entran en la pantalla.
+
+En `/admin/videos` (con la misma `ADMIN_KEY`) se ven del más nuevo al más
+viejo, con el saludo o el nombre, la duración y la hora. Ahí se lanzan, se
+paran, se repiten, se marcan como vistos o se borran. Borrar también los saca
+de `/loop`.
+
+La salida para OBS, vMix o Resolume es `/vj?token=...`. El token sale de
+`VJ_OUTPUT_TOKEN`. Sin esa variable la página responde 403. La `ADMIN_KEY` no
+va en esa URL. Arranca en mudo y sin marco; `&audio=1` prende el sonido y
+`&marco=1` pone el marco. Se actualiza sola cada 2 segundos.
 
 Quedan en la carpeta `Videos pantalla`, al lado de `Originales`. No se mezclan
-con los videos del álbum ni con la limpieza de las fotos. No hace falta
-ninguna variable nueva: usa la misma conexión de Drive.
+con los videos del álbum ni con la limpieza de las fotos. La subida usa la
+misma conexión de Drive. Antes de unir, cargá `VJ_OUTPUT_TOKEN` en Render.
 
 El `Procfile` deja un solo proceso de gunicorn con 4 hilos y un timeout de
-120 segundos, para que la pantalla pueda estar pasando un video y al mismo
-tiempo entre una foto. En el plan gratuito de Render no subas la cantidad de
-procesos: la memoria es de 512 MB.
+120 segundos. Hace falta: el worker por defecto es síncrono y corta a los 30
+segundos, así que un video de hasta 60 segundos dejaría trabada la única
+petición y no podría entrar una foto al mismo tiempo. El estado de «lanzar» y
+«parar» vive en ese proceso: con más de un proceso, la salida podría mirar
+otro y no ver el video. Cuatro hilos alcanzan para el loop, la salida, una
+subida y los avisos, sin subir la memoria del plan gratuito (512 MB).
 
 ### Transcodificar más adelante (VPS, no Render Free)
 

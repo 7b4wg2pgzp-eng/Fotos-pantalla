@@ -6,8 +6,8 @@ const VIDEO_CHUNK = 8 * 1024 * 1024;
 const MIME_BY_EXT = {mp4: "video/mp4", mov: "video/quicktime", webm: "video/webm"};
 const VIDEO_ERRORS = {
   type: "Tiene que ser mp4, mov o webm",
-  size: "El video pesa más de 100 MB",
-  duration: "El video tiene que durar hasta 60 segundos",
+  size: "Ese video pesa más de 100 MB. Probá con uno más corto.",
+  duration: "Ese video dura más de 60 segundos. Recortalo y probalo de nuevo.",
   unreadable: "No pudimos leer la duración · probá con otro"
 };
 const UPLOAD_FAILED = "No se pudo subir el video · probá de nuevo";
@@ -128,8 +128,20 @@ async function sendChunk(url, file, offset, end, total, putImpl, sleep, onRetry,
   throw new Error(UPLOAD_FAILED);
 }
 
-async function registerVideo(fetchImpl, uid, size, duration, sleep) {
+function guestField(value, limit) {
+  if (typeof value !== "string") return "";
+  const text = value.trim();
+  if (!text || /[<>]/.test(text)) return "";
+  return text.slice(0, limit);
+}
+
+async function registerVideo(fetchImpl, uid, size, duration, sleep, hooks) {
   let last = UPLOAD_FAILED;
+  const payload = {uid, size, duration};
+  const nombre = guestField(hooks && hooks.nombre, 40);
+  const saludo = guestField(hooks && hooks.saludo, 280);
+  if (nombre) payload.nombre = nombre;
+  if (saludo) payload.saludo = saludo;
   for (let attempt = 0; attempt < 3; attempt++) {
     if (attempt) await sleep(300 * attempt);
     let response;
@@ -137,7 +149,7 @@ async function registerVideo(fetchImpl, uid, size, duration, sleep) {
       response = await fetchImpl("/api/videos/register", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({uid, size, duration})
+        body: JSON.stringify(payload)
       });
     } catch (error) {
       continue;
@@ -189,7 +201,7 @@ async function uploadOnce(file, duration, hooks) {
     onProgress(offset, file.size);
   }
   onProgress(file.size, file.size);
-  await registerVideo(fetchImpl, session.uid, file.size, duration, sleep);
+  await registerVideo(fetchImpl, session.uid, file.size, duration, sleep, hooks);
 }
 
 async function uploadVideoFile(file, duration, hooks) {

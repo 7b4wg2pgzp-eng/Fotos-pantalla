@@ -267,6 +267,7 @@ class ModerationTests(unittest.TestCase):
         response = self.client.get('/photos/' + OTHER + '.jpg')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, b'other-preview')
+        self.assertEqual(response.headers['Cache-Control'], 'private, max-age=43200, immutable')
         response.close()
 
     def test_direct_album_download_and_zip_exclude_vetoed_copies(self):
