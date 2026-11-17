@@ -96,7 +96,6 @@ class ScreenVideoTests(unittest.TestCase):
         ensure = patch.object(self.screen._event_source, "ensure", return_value=self.config)
         ensure.start()
         self.addCleanup(ensure.stop)
-        self.videos.reset_vj_state()
         self.client = self.screen.app.test_client()
 
     def session(self, **extra):
@@ -334,7 +333,17 @@ class ScreenVideoTests(unittest.TestCase):
         with self.assertRaises(RuntimeError):
             self.videos.public_upload_url("http://www.googleapis.com/upload/drive/v3/files?upload_id=x")
 
-    def test_vj_lists_newest_first_and_output_uses_its_own_token(self):
+    def test_loop_plays_new_videos_without_approval(self):
+        self.add_video()
+        registered = self.register()
+        self.assertEqual(registered.status_code, 200)
+        items = self.client.get("/api/loop-items").json["items"]
+        self.assertIn(UID, [item.get("uid") for item in items if item.get("kind") == "video"])
+        self.assertNotIn("vj_output_page", self.screen.app.view_functions)
+        self.assertNotIn("vj_estado", self.screen.app.view_functions)
+        self.assertNotIn(b"setInterval(poll, 2000)", self.client.get("/vj").data)
+
+    def test_moderator_lists_previews_and_can_mark_or_delete(self):
         nuevo = "e" * 32
         clock = {"t": time.time()}
 
@@ -354,8 +363,7 @@ class ScreenVideoTests(unittest.TestCase):
         self.assertEqual(primero.status_code, 200)
         self.assertEqual(segundo.status_code, 200)
         self.assertEqual(self.client.get("/api/admin/videos").status_code, 403)
-        self.assertEqual(self.client.get("/vj").status_code, 403)
-        self.assertEqual(self.client.get("/vj/estado?token=test-key").status_code, 403)
+        self.assertEqual(self.client.post("/api/admin/videos", data={"action": "visto", "uid": UID}).status_code, 403)
         listed = self.client.get("/api/admin/videos", headers={"X-Admin-Key": "test-key"})
         self.assertEqual(listed.status_code, 200)
         rows = listed.json["videos"]
@@ -366,72 +374,31 @@ class ScreenVideoTests(unittest.TestCase):
         self.assertNotIn("file_id", rows[0])
         panel = self.client.post("/admin/videos", data={"key": "test-key"})
         self.assertEqual(panel.status_code, 200)
-        self.assertIn("Lanzar", panel.get_data(as_text=True))
-        self.assertIn("Repetir", panel.get_data(as_text=True))
-        self.assertIn("Descargar original", panel.get_data(as_text=True))
-        self.assertNotIn("key=", panel.get_data(as_text=True))
-        with patch.dict("os.environ", {"VJ_OUTPUT_TOKEN": "salida-secreta"}):
-            opened = self.client.post("/admin/videos", data={"key": "test-key"})
-            html = opened.get_data(as_text=True)
-            self.assertIn("http://localhost/vj?token=salida-secreta", html)
-            self.assertNotIn("token=test-key", html)
-            self.assertNotIn("ADMIN_KEY", html)
-            cerrado = self.client.get("/vj?token=salida-secreta")
-            self.assertEqual(self.client.get("/vj").status_code, 403)
-            self.assertEqual(self.client.get("/vj?token=otra").status_code, 403)
-        self.assertEqual(cerrado.status_code, 200)
-        salida = cerrado.get_data(as_text=True)
-        self.assertIn("muted", salida)
-        self.assertIn("background: #000", salida)
-        self.assertIn("setInterval(poll, 2000)", salida)
-        self.assertNotIn("controls", salida)
-        self.assertNotIn("Lanzar", salida)
-        self.assertNotIn("test-key", salida)
-        self.assertNotIn("box-shadow", salida)
-        launched = self.client.post(
-            "/api/admin/vj",
+        html = panel.get_data(as_text=True)
+        self.assertIn("Descargar original", html)
+        self.assertIn("Marcar visto", html)
+        self.assertIn("Borrar", html)
+        self.assertNotIn("Lanzar", html)
+        self.assertNotIn("Repetir", html)
+        self.assertNotIn("VJ_OUTPUT_TOKEN", html)
+        self.assertNotIn("key=", html)
+        self.assertEqual(self.client.post(
+            "/api/admin/videos",
             data={"action": "lanzar", "uid": nuevo},
             headers={"X-Admin-Key": "test-key"},
-        )
-        self.assertEqual(launched.status_code, 200)
-        self.assertEqual(launched.json["estado"]["mode"], "once")
-        self.assertEqual(launched.json["estado"]["uid"], nuevo)
-        with patch.dict("os.environ", {"VJ_OUTPUT_TOKEN": "salida-secreta"}):
-            estado = self.client.get("/vj/estado?token=salida-secreta")
-        self.assertEqual(estado.json["uid"], nuevo)
-        self.assertEqual(estado.json["mode"], "once")
-        self.assertNotIn("file_id", estado.json)
-        repetir = self.client.post(
-            "/api/admin/vj",
-            data={"action": "repetir", "uid": UID},
-            headers={"X-Admin-Key": "test-key"},
-        )
-        self.assertEqual(repetir.json["estado"]["mode"], "loop")
-        self.assertEqual(repetir.json["estado"]["uid"], UID)
+        ).status_code, 400)
         visto = self.client.post(
-            "/api/admin/vj",
+            "/api/admin/videos",
             data={"action": "visto", "uid": UID},
             headers={"X-Admin-Key": "test-key"},
         )
         self.assertEqual(visto.status_code, 200)
         marked = self.client.get("/api/admin/videos", headers={"X-Admin-Key": "test-key"}).json["videos"]
         self.assertTrue(next(row for row in marked if row["uid"] == UID)["seen"])
-        stopped = self.client.post(
-            "/api/admin/vj",
-            data={"action": "parar"},
-            headers={"X-Admin-Key": "test-key"},
-        )
-        self.assertEqual(stopped.json["estado"]["mode"], "stop")
-        self.assertIsNone(stopped.json["estado"]["uid"])
-        self.client.post(
-            "/api/admin/vj",
-            data={"action": "lanzar", "uid": nuevo},
-            headers={"X-Admin-Key": "test-key"},
-        )
+        self.assertIn(nuevo, [item.get("uid") for item in self.client.get("/api/loop-items").json["items"]])
         gone = self.client.post("/api/admin/borrar-video", data={"uid": nuevo, "key": "test-key"})
         self.assertEqual(gone.status_code, 200)
         self.assertNotIn(nuevo, [item.get("uid") for item in self.client.get("/api/loop-items").json["items"]])
-        self.assertEqual(self.videos.vj_public_status()["mode"], "stop")
         original = self.client.get("/videos/" + UID + "?descarga=1")
         self.assertIn("attachment", original.headers["Content-Disposition"])
         self.assertIn(UID + ".mp4", original.headers["Content-Disposition"])

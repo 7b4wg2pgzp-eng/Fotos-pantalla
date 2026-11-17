@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="robots" content="noindex, nofollow">
-<title>Videos · VJ</title>
+<title>Videos · moderar</title>
 <style>
 body{margin:0;padding:20px;background:#150F1F;color:#F5F0FA;font-family:system-ui,sans-serif;}
 h1{font-size:22px;margin:0 0 8px;color:#E8C468;}
@@ -30,23 +30,12 @@ a.bajar{background:#ffffff14;color:#E8C468;}
 </style>
 </head>
 <body>
-<h1>Videos para el VJ</h1>
-<p>Del más nuevo al más viejo. Lanzar y repetir salen en la página de salida, no cambian el loop de fotos.</p>
-{% if salida %}
-<div class="salida">
-  <div>Página de salida</div>
-  <code id="salidaUrl">{{ salida }}</code>
-  <p>Para el sonido agregá <code>&amp;audio=1</code>. Para el marco dorado agregá <code>&amp;marco=1</code>. Sin esos parámetros arranca en mudo y sin marco.</p>
-</div>
-{% else %}
-<p class="vacio">La salida está cerrada. Cargá VJ_OUTPUT_TOKEN en el entorno y volvé a abrir esta página.</p>
-{% endif %}
-<p class="en-aire" id="aire"></p>
+<h1>Videos en pantalla</h1>
+<p>Del más nuevo al más viejo. Salen solos en /loop. Desde acá se ven, se bajan, se marcan como vistos o se borran. Borrar también los saca del álbum.</p>
 <div id="lista"></div>
 <script>
 const KEY = {{ admin_key|tojson }};
 const lista = document.getElementById('lista');
-const aire = document.getElementById('aire');
 
 function hora(ts) {
   const date = new Date(Number(ts) * 1000);
@@ -68,7 +57,7 @@ async function accion(action, uid) {
   const body = new FormData();
   body.set('action', action);
   if (uid) body.set('uid', uid);
-  const res = await fetch('/api/admin/vj', {method: 'POST', body, headers: {'X-Admin-Key': KEY}});
+  const res = await fetch('/api/admin/videos', {method: 'POST', body, headers: {'X-Admin-Key': KEY}});
   if (!res.ok) {
     alert('No se pudo hacer. Volvé a intentar.');
     return;
@@ -89,7 +78,7 @@ async function borrar(uid) {
   cargar();
 }
 
-function fila(video, estado) {
+function fila(video) {
   const card = document.createElement('article');
   card.className = 'card';
   const preview = document.createElement('video');
@@ -106,28 +95,9 @@ function fila(video, estado) {
   meta.className = 'meta';
   const segundos = Math.max(0, Math.round(Number(video.duration) || 0));
   meta.textContent = segundos + ' s · ' + hora(video.ts) + (video.seen ? ' · visto' : '');
-  if (estado && estado.uid === video.uid && estado.mode !== 'stop') {
-    const marca = document.createElement('div');
-    marca.className = 'en-aire';
-    marca.textContent = estado.mode === 'loop' ? 'En el aire, en loop' : 'En el aire';
-    info.append(saludo, meta, marca);
-  } else {
-    info.append(saludo, meta);
-  }
+  info.append(saludo, meta);
   const botones = document.createElement('div');
   botones.className = 'botones';
-  const lanzar = document.createElement('button');
-  lanzar.className = 'lanzar';
-  lanzar.textContent = 'Lanzar';
-  lanzar.onclick = () => accion('lanzar', video.uid);
-  const parar = document.createElement('button');
-  parar.className = 'parar';
-  parar.textContent = 'Parar';
-  parar.onclick = () => accion('parar', video.uid);
-  const repetir = document.createElement('button');
-  repetir.className = 'parar';
-  repetir.textContent = 'Repetir en loop';
-  repetir.onclick = () => accion('repetir', video.uid);
   const visto = document.createElement('button');
   visto.className = 'visto';
   visto.textContent = video.seen ? 'Visto' : 'Marcar visto';
@@ -141,7 +111,7 @@ function fila(video, estado) {
   borrarBtn.className = 'borrar';
   borrarBtn.textContent = 'Borrar';
   borrarBtn.onclick = () => borrar(video.uid);
-  botones.append(lanzar, parar, repetir, visto, bajar, borrarBtn);
+  botones.append(visto, bajar, borrarBtn);
   info.append(botones);
   card.append(preview, info);
   return card;
@@ -152,10 +122,6 @@ async function cargar() {
   if (!res.ok) return;
   const data = await res.json();
   const videos = Array.isArray(data.videos) ? data.videos : [];
-  const estado = data.estado || {};
-  aire.textContent = estado.mode && estado.mode !== 'stop' && estado.uid
-    ? 'Salida: ' + (estado.mode === 'loop' ? 'loop' : 'una vez')
-    : 'Salida en negro';
   lista.replaceChildren();
   if (!videos.length) {
     const vacio = document.createElement('p');
@@ -166,7 +132,7 @@ async function cargar() {
   }
   videos.forEach((video) => {
     if (!/^[0-9a-f]{32}$/.test(video.uid || '')) return;
-    lista.append(fila(video, estado));
+    lista.append(fila(video));
   });
 }
 cargar();

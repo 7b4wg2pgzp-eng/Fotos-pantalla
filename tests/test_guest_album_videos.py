@@ -2,6 +2,7 @@
 import io
 import zipfile
 import unittest
+from datetime import datetime
 from unittest.mock import patch
 from flask import Flask
 
@@ -115,6 +116,11 @@ class GuestAlbumVideoTests(unittest.TestCase):
         ))
         self.delivery.clean_event_originals(self.config)
         self.assertNotIn('source-a', self.drive.rows)
+        self.assertEqual(self.delivery.drop_copies_removed_in_drive(self.config), 0)
+        self.assertTrue(any(
+            row.get('appProperties', {}).get('photoUid') == OTHER
+            for row in self.drive.rows.values()
+        ))
         self.assertIn('guest-file', self.drive.rows)
         self.assertIn('removed-file', self.drive.rows)
         self.delivery.on_guest_video('guest-file')
@@ -122,6 +128,43 @@ class GuestAlbumVideoTests(unittest.TestCase):
             row.get('appProperties', {}).get('sourceFileId') == 'guest-file'
             for row in self.drive.rows.values()
         ))
+
+    def test_album_gets_photo_greeting_and_video_until_something_is_deleted(self):
+        photo = self.drive.add('source-a', OTHER + '.jpg', 'originals', data=b'photo')
+        photo['createdTime'] = '2026-10-17T16:00:00-03:00'
+        self.delivery.copy_photo(self.drive.rows['source-a'], self.config)
+        self.delivery.copy_guest_video(self.guest, self.config)
+        when = datetime.fromisoformat('2026-10-17T19:00:00-03:00').timestamp()
+        self.delivery.on_messages([
+            {'nombre': 'Ana', 'texto': 'Hola', 'ts': when},
+            {'nombre': 'Luis', 'texto': 'Chau', 'ts': when + 60},
+        ])
+        manifest = self.manifest()
+        self.assertEqual(len(self.gallery.photos(manifest)), 1)
+        self.assertEqual(len(self.gallery.videos(manifest, fresh=True)), 1)
+        self.assertEqual(
+            [item['texto'] for item in self.gallery.greetings(manifest)],
+            ['Hola', 'Chau'],
+        )
+        self.delivery.on_messages([{'nombre': 'Ana', 'texto': 'Hola', 'ts': when}])
+        self.gallery.event_data.clear()
+        self.assertEqual(
+            [item['texto'] for item in self.gallery.greetings(manifest)],
+            ['Hola'],
+        )
+
+    def test_trashing_the_drive_original_drops_the_album_copy(self):
+        photo = self.drive.add('source-a', OTHER + '.jpg', 'originals', data=b'photo')
+        photo['createdTime'] = '2026-10-17T16:00:00-03:00'
+        self.delivery.copy_photo(self.drive.rows['source-a'], self.config)
+        self.delivery.copy_guest_video(self.guest, self.config)
+        manifest = self.manifest()
+        self.drive.rows['source-a']['trashed'] = True
+        self.drive.rows['guest-file']['trashed'] = True
+        self.assertEqual(self.delivery.drop_copies_removed_in_drive(self.config), 2)
+        self.assertEqual(self.gallery.photos(manifest), [])
+        self.assertEqual(self.gallery.videos(manifest, fresh=True), [])
+        self.assertIsNone(self.delivery.copy_guest_video(self.drive.rows['guest-file'], self.config))
 
 
 if __name__ == '__main__':

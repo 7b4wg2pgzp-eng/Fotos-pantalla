@@ -23,12 +23,10 @@ function frameBox(videoW, videoH, stageW, stageH) {
   };
 }
 
-function outputOptions(search) {
-  const params = new URLSearchParams(search || "");
-  return {
-    audio: params.get("audio") === "1",
-    marco: params.get("marco") === "1",
-  };
+function concealSlides(doc) {
+  if (!doc || !doc.querySelectorAll) return;
+  const visible = doc.querySelectorAll(".slide.active");
+  for (let i = 0; i < visible.length; i += 1) visible[i].classList.remove("active");
 }
 
 function createTurnClock(opts) {
@@ -37,11 +35,15 @@ function createTurnClock(opts) {
   const setInterval = opts.setInterval;
   const clearInterval = opts.clearInterval;
   const play = opts.play;
+  const conceal = opts.conceal || function () {};
   let timer = null;
   let busy = false;
+  let settled = false;
   let videos = [];
   let cursor = 0;
   let photoTicks = 0;
+  let currentUid = null;
+  let stopCurrent = null;
   const skipped = new Set();
 
   function playable() {
@@ -64,6 +66,17 @@ function createTurnClock(opts) {
     return timer;
   }
 
+  function endTurn(reason, video) {
+    if (settled) return;
+    settled = true;
+    currentUid = null;
+    stopCurrent = null;
+    if (video && reason === "decode") skipped.add(video.uid);
+    busy = false;
+    showNext();
+    arm();
+  }
+
   function tick() {
     if (busy) return;
     const video = videoDue();
@@ -72,14 +85,13 @@ function createTurnClock(opts) {
       return;
     }
     busy = true;
+    settled = false;
     if (timer != null) clearInterval(timer);
     timer = null;
-    play(video, (reason) => {
-      if (reason === "decode") skipped.add(video.uid);
-      busy = false;
-      showNext();
-      arm();
-    });
+    currentUid = video.uid;
+    conceal();
+    const stop = play(video, (reason) => endTurn(reason, video));
+    stopCurrent = typeof stop === "function" ? stop : null;
   }
 
   return {
@@ -87,6 +99,10 @@ function createTurnClock(opts) {
     tick,
     setVideos(list) {
       videos = Array.isArray(list) ? list.slice() : [];
+      if (!currentUid || videos.some((item) => item && item.uid === currentUid)) return;
+      const stop = stopCurrent;
+      if (stop) stop("deleted");
+      else endTurn("deleted", {uid: currentUid});
     },
   };
 }
@@ -107,46 +123,49 @@ function playClip(doc, video, done) {
   const emptyMsg = doc.getElementById("empty");
   if (!clip || !frame || !stage) {
     done("stall");
-    return;
+    return function () {};
   }
-  clip.onended = null;
-  clip.onerror = null;
-  clip.ontimeupdate = null;
-  clip.onplaying = null;
-  clip.onloadedmetadata = null;
-  clip.pause();
-  while (clip.firstChild) clip.removeChild(clip.firstChild);
-  clip.removeAttribute("src");
-  try { clip.load(); } catch (error) { /* el corte anterior ya soltó el video */ }
+  let finished = false;
+  let starter = null;
+  let watchdog = null;
   const token = (clip._token || 0) + 1;
   clip._token = token;
-  setTimeout(() => {
-    if (clip._token !== token) return;
+
+  function release() {
+    clip.onended = null;
+    clip.onerror = null;
+    clip.ontimeupdate = null;
+    clip.onplaying = null;
+    clip.onloadedmetadata = null;
+    clip.pause();
+    while (clip.firstChild) clip.removeChild(clip.firstChild);
+    clip.removeAttribute("src");
+    try { clip.load(); } catch (error) { /* el corte anterior ya soltó el video */ }
+    frame.classList.remove("playing");
+  }
+
+  function finish(reason) {
+    if (finished || clip._token !== token) return;
+    finished = true;
+    clip._token += 1;
+    clearTimeout(starter);
+    clearTimeout(watchdog);
+    release();
+    if (emptyMsg && !stage.querySelector(".slide")) emptyMsg.style.display = "flex";
+    done(reason);
+  }
+
+  starter = setTimeout(() => {
+    if (finished || clip._token !== token) return;
     clip.muted = true;
+    concealSlides(doc);
     frame.classList.add("playing");
     if (emptyMsg) emptyMsg.style.display = "none";
     const source = doc.createElement("source");
     source.src = video.src;
     source.type = video.mime;
     clip.appendChild(source);
-    let watchdog = setTimeout(() => finish("stall"), 45000);
-    function finish(reason) {
-      if (clip._token !== token) return;
-      clip._token += 1;
-      clearTimeout(watchdog);
-      clip.onended = null;
-      clip.onerror = null;
-      clip.ontimeupdate = null;
-      clip.onplaying = null;
-      clip.onloadedmetadata = null;
-      clip.pause();
-      while (clip.firstChild) clip.removeChild(clip.firstChild);
-      clip.removeAttribute("src");
-      try { clip.load(); } catch (error) { /* ya no hay video */ }
-      frame.classList.remove("playing");
-      if (emptyMsg && !stage.querySelector(".slide")) emptyMsg.style.display = "flex";
-      done(reason);
-    }
+    watchdog = setTimeout(() => finish("stall"), 45000);
     function fit() {
       if (clip._token !== token) return;
       if (clip.videoWidth && clip.videoHeight) applyFrame(frame, clip, stage);
@@ -161,7 +180,7 @@ function playClip(doc, video, done) {
       if (clip.currentTime >= VIDEO_CAP_S) finish("cap");
     };
     clip.onplaying = () => clearTimeout(watchdog);
-    if (!clip._fitBound) {
+    if (!clip._fitBound && typeof window !== "undefined") {
       clip._fitBound = true;
       window.addEventListener("resize", () => {
         if (frame.classList.contains("playing")) fit();
@@ -171,6 +190,7 @@ function playClip(doc, video, done) {
     const pending = clip.play();
     if (pending && pending.catch) pending.catch(() => finish("stall"));
   }, 0);
+  return (reason) => finish(reason || "deleted");
 }
 
 function validLoopVideo(item) {
@@ -199,6 +219,7 @@ function attachLoop(doc, win) {
         setInterval: nativeSetInterval,
         clearInterval: nativeClearInterval,
         play: (video, done) => playClip(doc, video, done),
+        conceal: () => concealSlides(doc),
       });
       clock.setVideos(pending);
       return clock.arm();
@@ -230,8 +251,9 @@ const screenLoopApi = {
   GOLD,
   borderPx,
   frameBox,
-  outputOptions,
   createTurnClock,
+  concealSlides,
+  playClip,
   validLoopVideo,
 };
 if (typeof module !== "undefined" && module.exports) module.exports = screenLoopApi;

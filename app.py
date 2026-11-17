@@ -6,7 +6,6 @@ import json
 import hmac
 import base64
 import threading
-import urllib.parse
 import mimetypes
 import encodings.idna  # Importar antes de iniciar el hilo de restauración de Drive.
 import subprocess
@@ -628,25 +627,7 @@ def admin_videos_page():
     blocked = _admin_gate()
     if blocked:
         return blocked
-    token = screen_videos.output_token()
-    salida = ""
-    if token:
-        salida = request.host_url.rstrip("/") + "/vj?token=" + urllib.parse.quote(token)
-    return render_template("admin_videos.html", admin_key=_admin_key_from_request(), salida=salida)
-
-
-@app.route("/vj")
-def vj_output_page():
-    if not screen_videos.output_authorized(request.args.get("token", "")):
-        return ("", 403)
-    return render_template("vj_salida.html")
-
-
-@app.route("/vj/estado")
-def vj_estado():
-    if not screen_videos.output_authorized(request.args.get("token", "")):
-        return jsonify(ok=False), 403
-    return jsonify(screen_videos.vj_public_status())
+    return render_template("admin_videos.html", admin_key=_admin_key_from_request())
 
 
 @app.route("/api/admin/entrega", methods=["GET", "POST"])

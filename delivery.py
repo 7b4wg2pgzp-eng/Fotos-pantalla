@@ -213,7 +213,7 @@ class Delivery:
 
     def copy_photo(self, source, config):
         self.require_drive()
-        if self.is_vetoed(source):
+        if self.is_vetoed(source) or source.get('trashed'):
             return None
         if source['mimeType'] == FOLDER or not source.get('md5Checksum'):
             raise RuntimeError('El original no permite verificar su integridad.')
@@ -242,7 +242,7 @@ class Delivery:
     def copy_guest_video(self, source, config):
         """Copia un video de invitado a la carpeta Videos del álbum. No borra el original."""
         self.require_drive()
-        if source.get('mimeType') not in GUEST_VIDEO_MIMES:
+        if source.get('mimeType') not in GUEST_VIDEO_MIMES or source.get('trashed'):
             return None
         if self.is_vetoed(source):
             return None
@@ -281,6 +281,42 @@ class Delivery:
             self.service.files().delete(fileId=copied['id']).execute()
             return None
         return event, copied
+
+    def source_removed_in_drive(self, file_id):
+        """True si Nico tiró el archivo a la papelera o ya no está en Drive."""
+        try:
+            row = self.service.files().get(fileId=file_id, fields='id,trashed').execute()
+        except Exception as error:
+            status = getattr(getattr(error, 'resp', None), 'status', None)
+            if status == 404:
+                return True
+            raise
+        return bool(row.get('trashed'))
+
+    def drop_copies_removed_in_drive(self, config):
+        """Saca de Entregas la copia si el original se borró en Drive.
+
+        La limpieza de fotos marca la copia con photoUid y después borra el
+        original a propósito. Esa copia se queda: es la del álbum.
+        """
+        event, photos = self.folders(config, False)
+        if not event:
+            return 0
+        folder_ids = [photos['id']] if photos else []
+        videos = self.find_folder(event['id'], ALBUM_VIDEO_FOLDER)
+        if videos:
+            folder_ids.append(videos['id'])
+        removed = 0
+        for folder_id in folder_ids:
+            for copy in list(self.list_files(folder_id)):
+                props = copy.get('appProperties') or {}
+                source_id = props.get('sourceFileId')
+                if not source_id or props.get('photoUid'):
+                    continue
+                if self.source_removed_in_drive(source_id):
+                    self.service.files().delete(fileId=copy['id']).execute()
+                    removed += 1
+        return removed
 
     def copy_guest_videos(self, config):
         """Reintenta las copias que faltan. No exige que ya estén para limpiar las fotos."""
@@ -386,6 +422,7 @@ class Delivery:
             config = self.load_config()
             if not config or not config['enabled']:
                 raise ValueError('Primero activá la entrega de un evento.')
+            self.drop_copies_removed_in_drive(config)
             originals = self.find_folder(self.root, 'Originales')
             if not originals:
                 # Puede haber saludos aunque nadie haya compartido una foto.

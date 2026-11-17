@@ -59,6 +59,8 @@ class FakeDrive:
             if self.fail_read:
                 raise RuntimeError('simulated list failure')
             rows = list(self.rows.values())
+            if 'trashed = false' in q:
+                rows = [r for r in rows if not r.get('trashed')]
             parents = re.findall(r"'([^']+)' in parents", q)
             equal = re.findall(r"(?<![A-Za-z])name = '([^']*)'", q)
             contains = re.findall(r"name contains '([^']*)'", q)
