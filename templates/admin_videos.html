@@ -126,7 +126,7 @@ function fila(video, estado) {
   parar.onclick = () => accion('parar', video.uid);
   const repetir = document.createElement('button');
   repetir.className = 'parar';
-  repetir.textContent = 'Repetir';
+  repetir.textContent = 'Repetir en loop';
   repetir.onclick = () => accion('repetir', video.uid);
   const visto = document.createElement('button');
   visto.className = 'visto';
