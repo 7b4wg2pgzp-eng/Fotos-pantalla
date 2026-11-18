@@ -24,6 +24,13 @@ from delivery import FOLDER, escaped
 
 MAX_SECONDS = 60
 MAX_BYTES = 100 * 1024 * 1024
+VIDEO_LIMIT = 3
+VIDEO_WINDOW_SECONDS = 600
+SCREEN_FORMAT_MESSAGE = (
+    "Este video está en un formato que la pantalla no puede mostrar. "
+    "En el iPhone andá a Ajustes > Cámara > Formatos, elegí «Más compatible» "
+    "y grabalo de nuevo, o mandá otro video."
+)
 # Margen corto: el celular a veces reporta 60.01 en un video de un minuto.
 DURATION_GRACE = 0.05
 PLAYBACK_CHUNK = 1024 * 1024
@@ -41,7 +48,13 @@ SCREEN_EVENT_PATHS = {
 }
 UPLOAD_URL = "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable"
 _lock = threading.RLock()
+_video_hits = {}
+_video_hits_lock = threading.Lock()
 deps = None
+
+
+class ScreenFormatError(ValueError):
+    """El contenedor declara HEVC y la pantalla no lo puede mostrar."""
 NAME_LIMIT = 40
 GREETING_LIMIT = 280
 
@@ -303,6 +316,96 @@ def _find_named(folder_id, name):
     return deps.delivery().list_files(folder_id, f"name = '{escaped(name)}'")
 
 
+def client_ip():
+    header = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if header:
+        return header.split(",")[0].strip()
+    return request.remote_addr or "?"
+
+
+def video_rate_limited():
+    """Tres sesiones de video por IP cada 10 minutos."""
+    now = time.time()
+    ip = client_ip()
+    with _video_hits_lock:
+        hits = [stamp for stamp in _video_hits.get(ip, []) if now - stamp < VIDEO_WINDOW_SECONDS]
+        if len(hits) >= VIDEO_LIMIT:
+            _video_hits[ip] = hits
+            return True
+        hits.append(now)
+        _video_hits[ip] = hits
+        if len(_video_hits) > 5000:
+            _video_hits.clear()
+        return False
+
+
+def _box_header(header, remaining):
+    if len(header) < 8 or remaining < 8:
+        return None
+    size = int.from_bytes(header[:4], "big")
+    kind = header[4:8]
+    header_len = 8
+    if size == 1:
+        if len(header) < 16 or remaining < 16:
+            return None
+        size = int.from_bytes(header[8:16], "big")
+        header_len = 16
+    elif size == 0:
+        size = remaining
+    if size < header_len or size > remaining:
+        return None
+    return kind, size, header_len
+
+
+def _read_box(read_at, start, length):
+    data = read_at(start, length)
+    if not isinstance(data, (bytes, bytearray)):
+        return b""
+    return bytes(data[:length])
+
+
+def declares_hevc(read_at, size):
+    """True si el MP4/MOV tiene la marca hvc1 o hev1 en ftyp o moov.
+
+    Solo lee encabezados y esas cajas. No baja el mdat.
+    """
+    if not isinstance(size, int) or size < 8:
+        return False
+    offset = 0
+    for _guard in range(10000):
+        if offset + 8 > size:
+            return False
+        header = _read_box(read_at, offset, min(16, size - offset))
+        parsed = _box_header(header, size - offset)
+        if not parsed:
+            return False
+        kind, box_size, _header_len = parsed
+        if kind in {b"ftyp", b"moov"}:
+            chunk = _read_box(read_at, offset, min(box_size, 2 * 1024 * 1024))
+            if b"hvc1" in chunk or b"hev1" in chunk:
+                return True
+        offset += box_size
+        if offset >= size:
+            return False
+    return False
+
+
+def _reject_hevc_file(file_id, size):
+    def read_at(start, length):
+        if start < 0 or start >= size or length <= 0:
+            return b""
+        end = min(size - 1, start + length - 1)
+        return deps.read_range(file_id, start, end)
+
+    if not declares_hevc(read_at, size):
+        return
+    try:
+        deps.drive().files().delete(fileId=file_id).execute()
+    except Exception:
+        traceback.print_exc()
+    raise ScreenFormatError(SCREEN_FORMAT_MESSAGE)
+
+
 def create_session(ext, size, duration):
     if deps.drive() is None:
         raise RuntimeError("No hay Drive para guardar el video.")
@@ -370,6 +473,7 @@ def register_upload(uid, size, duration, nombre="", saludo=""):
             stored_size = 0
         if stored_size != size:
             raise ValueError("video")
+        _reject_hevc_file(stored["id"], size)
         row = {
             "uid": uid,
             "name": f"{uid}.{ext}",
@@ -456,6 +560,7 @@ def register_screen_videos(app, injected):
 
     @app.route("/api/videos/session", methods=["POST"])
     def video_session():
+        deps.release_event_lock()
         if request.content_length and request.content_length > 4096:
             return jsonify(ok=False, error="No se pudo preparar el video."), 413
         payload = request.get_json(silent=True) or {}
@@ -465,7 +570,6 @@ def register_screen_videos(app, injected):
             duration = parse_duration(payload.get("duration"))
             if payload.get("mime") != EXTS[ext]:
                 raise ValueError("formato")
-            body = create_session(ext, size, duration)
         except ValueError as error:
             reason = str(error)
             if reason == "tamaño":
@@ -475,6 +579,10 @@ def register_screen_videos(app, injected):
             else:
                 message = "Tiene que ser mp4, mov o webm."
             return jsonify(ok=False, error=message), 400
+        if video_rate_limited():
+            return jsonify(ok=False, error="Ya mandaste 3 videos en los últimos 10 minutos. Esperá un poco y probá de nuevo."), 429
+        try:
+            body = create_session(ext, size, duration)
         except Exception:
             traceback.print_exc()
             return jsonify(ok=False, error="No hay Drive para guardar el video."), 503
@@ -482,6 +590,7 @@ def register_screen_videos(app, injected):
 
     @app.route("/api/videos/register", methods=["POST"])
     def video_register():
+        deps.release_event_lock()
         if request.content_length and request.content_length > 4096:
             return jsonify(ok=False, error="No se pudo registrar el video."), 413
         payload = request.get_json(silent=True) or {}
@@ -494,6 +603,8 @@ def register_screen_videos(app, injected):
             row = register_upload(uid, size, duration, nombre, saludo)
         except LookupError:
             return jsonify(ok=False, error="El video todavía no está en Drive. Reintentá."), 409
+        except ScreenFormatError:
+            return jsonify(ok=False, error=SCREEN_FORMAT_MESSAGE), 400
         except ValueError:
             return jsonify(ok=False, error="No se pudo registrar el video."), 400
         except Exception:

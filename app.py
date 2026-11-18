@@ -838,6 +838,13 @@ _event_source = EventSource(_delivery, _reset_event_runtime, close_runtime=_clos
                             closure_messages=_persistent_event_messages)
 
 
+def release_event_lock_for_drive():
+    """El chequeo del evento ya se hizo. Drive no tiene que seguir trabando el candado."""
+    if getattr(g, "eventphotos_lock", False):
+        g.eventphotos_lock = False
+        _event_lock.release()
+
+
 @app.before_request
 def isolate_eventphotos_event():
     if request.path not in {"/api/upload", "/api/photos", "/api/mensajes", "/", "/loop", "/saludos", *screen_videos.SCREEN_EVENT_PATHS}:
@@ -922,6 +929,9 @@ class _ScreenDeps:
 
     def deliver_video(self, file_id):
         _update_delivery("video", file_id)
+
+    def release_event_lock(self):
+        release_event_lock_for_drive()
 
 
 screen_videos.register_screen_videos(app, _ScreenDeps())

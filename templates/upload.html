@@ -405,7 +405,7 @@
     status.textContent = 'Leyendo el video…';
     try {
       const duration = await readDuration(file);
-      const error = videoRejection(file, duration);
+      const error = videoRejection(file, duration) || await screenFormatError(file);
       if (error) throw new Error(error);
       selectedVideo = {file, duration};
       const mb = (file.size / (1024 * 1024)).toFixed(1);

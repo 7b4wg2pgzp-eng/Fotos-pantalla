@@ -8,7 +8,8 @@ const VIDEO_ERRORS = {
   type: "Tiene que ser mp4, mov o webm",
   size: "Ese video pesa más de 100 MB. Probá con uno más corto.",
   duration: "Ese video dura más de 60 segundos. Recortalo y probalo de nuevo.",
-  unreadable: "No pudimos leer la duración · probá con otro"
+  unreadable: "No pudimos leer la duración · probá con otro",
+  screen: "Este video está en un formato que la pantalla no puede mostrar. En el iPhone andá a Ajustes > Cámara > Formatos, elegí «Más compatible» y grabalo de nuevo, o mandá otro video."
 };
 const UPLOAD_FAILED = "No se pudo subir el video · probá de nuevo";
 
@@ -24,6 +25,113 @@ function videoRejection(file, duration) {
   if (!file.size || file.size > VIDEO_MAX_BYTES) return VIDEO_ERRORS.size;
   if (typeof duration !== "number" || !isFinite(duration) || duration <= 0) return VIDEO_ERRORS.unreadable;
   if (duration > VIDEO_MAX_SECONDS + VIDEO_DURATION_GRACE) return VIDEO_ERRORS.duration;
+  return null;
+}
+
+function u32(bytes, offset) {
+  return ((bytes[offset] << 24) | (bytes[offset + 1] << 16) | (bytes[offset + 2] << 8) | bytes[offset + 3]) >>> 0;
+}
+
+function fourccAt(bytes, offset, text) {
+  return bytes[offset] === text.charCodeAt(0)
+    && bytes[offset + 1] === text.charCodeAt(1)
+    && bytes[offset + 2] === text.charCodeAt(2)
+    && bytes[offset + 3] === text.charCodeAt(3);
+}
+
+function hasFourcc(bytes, text) {
+  for (let i = 0; i + 3 < bytes.length; i += 1) {
+    if (fourccAt(bytes, i, text)) return true;
+  }
+  return false;
+}
+
+function boxHeader(header, remaining) {
+  if (!header || header.length < 8 || remaining < 8) return null;
+  let size = u32(header, 0);
+  let headerLen = 8;
+  if (size === 1) {
+    if (header.length < 16 || remaining < 16) return null;
+    const high = u32(header, 8);
+    const low = u32(header, 12);
+    size = high * 4294967296 + low;
+    headerLen = 16;
+  } else if (size === 0) {
+    size = remaining;
+  }
+  if (size < headerLen || size > remaining) return null;
+  const type = String.fromCharCode(header[4], header[5], header[6], header[7]);
+  return {type, size};
+}
+
+async function readSlice(file, start, length) {
+  const end = Math.min(file.size, start + length);
+  if (!(file.slice)) return new Uint8Array();
+  const slice = file.slice(start, end);
+  const buffer = slice.arrayBuffer ? await slice.arrayBuffer() : null;
+  return buffer ? new Uint8Array(buffer) : new Uint8Array();
+}
+
+async function containerIsHevc(file) {
+  const size = file && file.size;
+  if (!size || size < 8) return false;
+  let offset = 0;
+  for (let guard = 0; guard < 10000 && offset + 8 <= size; guard += 1) {
+    const header = await readSlice(file, offset, Math.min(16, size - offset));
+    const parsed = boxHeader(header, size - offset);
+    if (!parsed) return false;
+    if (parsed.type === "ftyp" || parsed.type === "moov") {
+      const chunk = await readSlice(file, offset, Math.min(parsed.size, 2 * 1024 * 1024));
+      if (hasFourcc(chunk, "hvc1") || hasFourcc(chunk, "hev1")) return true;
+    }
+    offset += parsed.size;
+  }
+  return false;
+}
+
+function defaultCanPlay(mime) {
+  if (typeof document === "undefined" || !document.createElement) return "maybe";
+  const el = document.createElement("video");
+  if (!el.canPlayType) return "maybe";
+  return el.canPlayType(mime) || "";
+}
+
+function defaultProbe(file) {
+  return new Promise((resolve) => {
+    if (typeof document === "undefined") {
+      resolve(true);
+      return;
+    }
+    const url = URL.createObjectURL(file);
+    const el = document.createElement("video");
+    let settled = false;
+    const timer = setTimeout(() => finish(false), 8000);
+    function finish(ok) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      URL.revokeObjectURL(url);
+      el.removeAttribute("src");
+      try { el.load(); } catch (error) { /* ya no importa */ }
+      resolve(ok);
+    }
+    el.preload = "metadata";
+    el.muted = true;
+    el.onloadedmetadata = () => finish(true);
+    el.onerror = () => finish(false);
+    el.src = url;
+  });
+}
+
+async function screenFormatError(file, hooks) {
+  hooks = hooks || {};
+  if (await containerIsHevc(file)) return VIDEO_ERRORS.screen;
+  const mime = MIME_BY_EXT[extensionOf(file && file.name)];
+  if (!mime) return null;
+  const canPlay = hooks.canPlay || defaultCanPlay;
+  if (canPlay(mime, file) === "") return VIDEO_ERRORS.screen;
+  const probe = hooks.probe || defaultProbe;
+  if (await probe(file) === false) return VIDEO_ERRORS.screen;
   return null;
 }
 
@@ -216,7 +324,7 @@ async function uploadVideoFile(file, duration, hooks) {
 }
 
 const videoUploadApi = {
-  videoRejection, uploadVideoFile, readDuration, chunkEnd, resumeOffset,
+  videoRejection, screenFormatError, containerIsHevc, uploadVideoFile, readDuration, chunkEnd, resumeOffset,
   VIDEO_MAX_BYTES, VIDEO_MAX_SECONDS, VIDEO_CHUNK, VIDEO_ERRORS, UPLOAD_FAILED, MIME_BY_EXT
 };
 if (typeof module !== "undefined" && module.exports) module.exports = videoUploadApi;
