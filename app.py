@@ -5,8 +5,6 @@ import uuid
 import json
 import hmac
 import base64
-import hashlib
-import secrets
 import threading
 import mimetypes
 import encodings.idna  # Importar antes de iniciar el hilo de restauración de Drive.
@@ -17,6 +15,7 @@ from typing import Optional
 from delivery import Delivery, parse_date, photo_uid
 from event_source import EventSource
 from gallery import Gallery, register_gallery
+import screen_videos
 
 from flask import Flask, g, request, jsonify, render_template, send_from_directory, abort, redirect
 from werkzeug.utils import secure_filename
@@ -29,6 +28,50 @@ except ImportError:
     pillow_heif = None
 
 app = Flask(__name__)
+# Tope por pedido. Configurable con MAX_UPLOAD_MB. Un archivo enorme dejaba
+# trabado al único worker del plan gratuito.
+app.config["MAX_CONTENT_LENGTH"] = int(os.environ.get("MAX_UPLOAD_MB", "40")) * 1024 * 1024
+
+# Cuántos archivos acepta cada persona en 10 minutos. La IP es la que manda
+# Cloudflare (CF-Connecting-IP); si no está, se usa la del pedido.
+UPLOAD_LIMIT = int(os.environ.get("UPLOAD_LIMIT_10MIN", "40"))
+UPLOAD_WINDOW_SECONDS = 600
+_upload_hits = {}
+_upload_hits_lock = threading.Lock()
+
+
+def _client_ip():
+    header = (request.headers.get("CF-Connecting-IP") or "").strip()
+    if header:
+        return header.split(",")[0].strip()
+    return request.remote_addr or "?"
+
+
+def _rate_limited(n_files: int) -> bool:
+    now = time.time()
+    ip = _client_ip()
+    counted = max(int(n_files), 1)
+    with _upload_hits_lock:
+        hits = [t for t in _upload_hits.get(ip, []) if now - t < UPLOAD_WINDOW_SECONDS]
+        if len(hits) + counted > UPLOAD_LIMIT:
+            _upload_hits[ip] = hits
+            return True
+        hits.extend([now] * counted)
+        _upload_hits[ip] = hits
+        if len(_upload_hits) > 5000:
+            _upload_hits.clear()
+        return False
+
+
+@app.errorhandler(413)
+def demasiado_grande(_e):
+    return jsonify(ok=False, error="El archivo es muy pesado para subirlo por acá."), 413
+
+
+@app.route("/health")
+def health():
+    # Para el health check de Render. No consulta Drive ni el evento.
+    return jsonify(ok=True)
 
 
 @app.before_request
@@ -177,6 +220,8 @@ def _update_delivery(kind, value):
     try:
         if kind == "photo":
             _delivery.on_photo(value)
+        elif kind == "video":
+            _delivery.on_guest_video(value)
         else:
             _delivery.on_messages(value)
     except Exception:
@@ -269,6 +314,8 @@ ALLOWED_EXT = {
 }
 PREVIEWABLE_EXT = {"jpg", "jpeg", "png", "heic", "heif", "webp"}
 GOLD_BORDER_RGB = (232, 196, 104)
+PREVIEW_MAX_PX = int(os.environ.get("PREVIEW_MAX_PX", "1920"))
+PREVIEW_QUALITY = int(os.environ.get("PREVIEW_QUALITY", "82"))
 BORDER_RATIO = 0.012
 MIN_BORDER_PX = 10
 
@@ -354,6 +401,22 @@ def convert_raw_to_jpeg_bytes(original_bytes: bytes, ext: str) -> bytes:
                 os.remove(p)
 
 
+def _preview_jpeg(original_bytes: bytes) -> bytes:
+    """Arma la JPEG del loop. Si Pillow no puede abrirla, no es una imagen."""
+    with Image.open(io.BytesIO(original_bytes)) as probe:
+        probe.verify()
+    with Image.open(io.BytesIO(original_bytes)) as source:
+        source.draft("RGB", (PREVIEW_MAX_PX, PREVIEW_MAX_PX))
+        img = ImageOps.exif_transpose(source)
+        img = img.convert("RGB")
+        # La pantalla no necesita 12 MP: 1920 px de lado alcanza para el loop.
+        img.thumbnail((PREVIEW_MAX_PX, PREVIEW_MAX_PX), Image.Resampling.LANCZOS)
+        img = add_gold_border(img)
+        buf = io.BytesIO()
+        img.save(buf, "JPEG", quality=PREVIEW_QUALITY, optimize=True, progressive=True)
+        return buf.getvalue()
+
+
 def save_upload(file_storage) -> Optional[str]:
     if not file_storage or not file_storage.filename:
         return None
@@ -364,27 +427,31 @@ def save_upload(file_storage) -> Optional[str]:
     uid = uuid.uuid4().hex
     original_bytes = file_storage.stream.read()
 
+    # La extensión sola no alcanza: un texto renombrado a .jpg no tiene que
+    # llegar a Drive. Primero se valida y se arma la preview.
+    preview_data = None
+    if ext in PREVIEWABLE_EXT:
+        try:
+            preview_data = _preview_jpeg(original_bytes)
+        except Exception:
+            print(f"[upload] descartado (no es una imagen válida): {file_storage.filename!r}")
+            return None
+
     save_original(f"{uid}.{ext}", original_bytes)
 
-    try:
-        preview_bytes = original_bytes if ext in PREVIEWABLE_EXT else convert_raw_to_jpeg_bytes(original_bytes, ext)
-        img = Image.open(io.BytesIO(preview_bytes))
-        img = ImageOps.exif_transpose(img)
-        img = img.convert("RGB")
-        img = add_gold_border(img)
+    if preview_data is None:
+        try:
+            preview_data = _preview_jpeg(convert_raw_to_jpeg_bytes(original_bytes, ext))
+        except Exception as e:
+            print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} - {e}")
+            return "sin-preview"
 
-        cache_name = f"{uid}.jpg"
-        buf = io.BytesIO()
-        img.save(buf, "JPEG", quality=92)
-        preview_data = buf.getvalue()
-        with open(CACHE_DIR / cache_name, "wb") as f:
-            f.write(preview_data)
-        # Copia chica en Drive para poder rearmar el loop si el server reinicia.
-        drive_upsert(f"preview-{uid}.jpg", preview_data, get_subfolder("Previews"))
-        return cache_name
-    except Exception as e:
-        print(f"[upload] guardado como respaldo, sin preview de loop ({ext}): {file_storage.filename!r} - {e}")
-        return "sin-preview"
+    cache_name = f"{uid}.jpg"
+    with open(CACHE_DIR / cache_name, "wb") as f:
+        f.write(preview_data)
+    # Copia chica en Drive para poder rearmar el loop si el server reinicia.
+    drive_upsert(f"preview-{uid}.jpg", preview_data, get_subfolder("Previews"))
+    return cache_name
 
 
 @app.route("/")
@@ -394,7 +461,12 @@ def upload_page():
 
 @app.route("/loop")
 def loop_page():
-    return render_template("loop.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME), marca=MARCA)
+    return render_template(
+        "loop.html",
+        event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME),
+        marca=MARCA,
+        video_max_seconds=screen_videos.MAX_SECONDS,
+    )
 
 
 @app.route("/saludos")
@@ -411,19 +483,30 @@ def api_upload():
 
     if not files and not mensaje.strip():
         return jsonify(ok=False, error="Manda al menos una foto o un saludo"), 400
+    if _rate_limited(len(files)):
+        return jsonify(ok=False, error="Mandaste muchas fotos seguidas. Esperá unos minutos y probá de nuevo."), 429
 
     saved = []
+    fallo_guardado = False
     for f in files:
         try:
             name = save_upload(f)
             if name:
                 saved.append(name)
             else:
-                print(f"[upload] descartado (extension no reconocida): {f.filename!r}")
+                print(f"[upload] descartado (extension no reconocida o no es imagen): {f.filename!r}")
         except Exception:
+            fallo_guardado = True
             import traceback
             traceback.print_exc()
             continue
+
+    if files and not saved:
+        # El saludo no se guarda en este pedido: el celular va a reintentar la foto
+        # y el saludo viaja con ella. Así no queda duplicado.
+        if fallo_guardado:
+            return jsonify(ok=False, error="No se pudo guardar la foto. Probá de nuevo."), 503
+        return jsonify(ok=False, error="Ese archivo no es una imagen que podamos mostrar."), 400
 
     mensaje_guardado = False
     try:
@@ -438,20 +521,25 @@ def api_upload():
     return jsonify(ok=True, saved=saved, mensaje=mensaje_guardado, entrega_pendiente=bool(_delivery.last_error))
 
 
+def _visible_photo_files():
+    vetoes = _photo_vetoes()
+    corte = time.time() - RETENTION_SECONDS
+    files = [
+        p for p in CACHE_DIR.iterdir()
+        if p.is_file() and p.suffix.lower() == ".jpg" and p.stat().st_mtime >= corte
+        and photo_uid(p.name) not in vetoes
+    ]
+    files.sort(key=lambda p: p.stat().st_mtime)
+    return files
+
+
 @app.route("/api/photos")
 def api_photos():
     with _event_lock:
         try:
-            vetoes = _photo_vetoes()
+            files = _visible_photo_files()
         except Exception:
             return jsonify(ok=False, photos=[], error="No se pudo verificar la moderación."), 503
-        corte = time.time() - RETENTION_SECONDS
-        files = [
-            p for p in CACHE_DIR.iterdir()
-            if p.is_file() and p.suffix.lower() == ".jpg" and p.stat().st_mtime >= corte
-            and photo_uid(p.name) not in vetoes
-        ]
-        files.sort(key=lambda p: p.stat().st_mtime)
         return jsonify(photos=[f"/photos/{p.name}" for p in files])
 
 
@@ -474,7 +562,9 @@ def serve_photo(filename):
         if vetoed:
             abort(404)
         response = send_from_directory(CACHE_DIR, filename)
-        response.headers['Cache-Control'] = 'no-store'
+        # El nombre es un UUID: el contenido no cambia. El navegador del loop
+        # puede guardarla. Si se modera, deja de salir en /api/photos.
+        response.headers['Cache-Control'] = 'private, max-age=43200, immutable'
         return response
 
 
@@ -486,97 +576,58 @@ def _photo_vetoes():
 
 
 # ---- Clave del moderador ----
-# Se estrena como el PIN de un cajero: la primera persona que abre /admin elige
-# la suya. Se guarda como hash (nunca la clave en claro) en la carpeta Datos de
-# Drive, porque el disco de Render en plan gratuito es efimero y se borra en
-# cada reinicio. El nombre del archivo lleva el id del servicio de Render, asi
-# main y vj tienen cada uno su clave aunque compartan la carpeta de Drive.
-ADMIN_STATE_NAME = "admin-" + (os.environ.get("RENDER_SERVICE_ID") or "local") + ".json"
-ADMIN_STATE_FILE = CACHE_DIR / ADMIN_STATE_NAME
-_admin_lock = threading.Lock()
+# Sale solo de ADMIN_KEY, en el entorno del servicio. Antes, si esa variable no
+# estaba, la primera persona que abría /admin elegía la clave desde la web.
+# Sin la variable el moderador no abre y nadie puede inventar una clave.
 
 
-def _admin_hash(clave: str, salt: str) -> str:
-    return hashlib.pbkdf2_hmac("sha256", clave.encode(), salt.encode(), 200_000).hex()
-
-
-def _admin_state():
-    """El estado de la clave: primero el cache local, si no esta, Drive."""
-    if ADMIN_STATE_FILE.exists():
-        try:
-            with open(ADMIN_STATE_FILE, encoding="utf-8") as f:
-                return json.load(f)
-        except Exception:
-            pass
-    fid = _drive_find_id(ADMIN_STATE_NAME, get_subfolder("Datos"))
-    if fid:
-        datos = drive_download(fid)
-        if datos:
-            try:
-                estado = json.loads(datos)
-            except Exception:
-                return None
-            with open(ADMIN_STATE_FILE, "wb") as f:
-                f.write(datos)
-            return estado
-    return None
-
-
-def _admin_set_key(clave: str) -> None:
-    salt = secrets.token_hex(16)
-    datos = json.dumps({
-        "salt": salt,
-        "hash": _admin_hash(clave, salt),
-        "creada": int(time.time()),
-    }).encode("utf-8")
-    with _admin_lock:
-        with open(ADMIN_STATE_FILE, "wb") as f:
-            f.write(datos)
-        drive_upsert(ADMIN_STATE_NAME, datos, get_subfolder("Datos"))
-
-
-def _admin_configurada() -> bool:
-    return bool(ADMIN_KEY) or _admin_state() is not None
+def _admin_key_from_request() -> str:
+    return request.headers.get("X-Admin-Key") or request.args.get("key") or request.form.get("key") or ""
 
 
 def _check_admin():
-    clave = request.args.get("key") or request.form.get("key") or ""
-    if not clave:
+    clave = _admin_key_from_request()
+    if not ADMIN_KEY or not clave:
         return False
-    if ADMIN_KEY and hmac.compare_digest(clave, ADMIN_KEY):
-        return True
-    estado = _admin_state()
-    if not estado:
-        return False
-    return hmac.compare_digest(_admin_hash(clave, estado["salt"]), estado["hash"])
+    return hmac.compare_digest(clave, ADMIN_KEY)
+
+
+def _admin_gate():
+    if not ADMIN_KEY:
+        return (
+            "El moderador todavía no tiene clave. Configurá ADMIN_KEY en el entorno del servicio y volvé a entrar.",
+            403,
+            {"Content-Type": "text/plain; charset=utf-8"},
+        )
+    if not _check_admin():
+        intento = bool(_admin_key_from_request())
+        return render_template("admin_login.html", error=intento), (403 if intento else 200)
+    return None
 
 
 @app.route("/admin", methods=["GET", "POST"])
 def admin_page():
-    # 1) Todavia no hay clave: la primera persona que entra elige la suya.
-    if not _admin_configurada():
-        if request.method == "POST":
-            nueva = request.form.get("nueva", "")
-            repetir = request.form.get("repetir", "")
-            if len(nueva) < 6:
-                return render_template(
-                    "admin_estrenar.html",
-                    error="La clave tiene que tener al menos 6 caracteres."), 400
-            if nueva != repetir:
-                return render_template(
-                    "admin_estrenar.html", error="Las dos no coinciden."), 400
-            _admin_set_key(nueva)
-            return render_template("admin.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME),
-                                   marca=MARCA, admin_key=nueva)
-        return render_template("admin_estrenar.html", error=None)
+    if not ADMIN_KEY:
+        return (
+            "El moderador todavía no tiene clave. Configurá ADMIN_KEY en el entorno del servicio y volvé a entrar.",
+            403,
+            {"Content-Type": "text/plain; charset=utf-8"},
+        )
 
-    # 2) Ya hay clave: formulario de siempre.
     if not _check_admin():
         intento = bool(request.args.get("key") or request.form.get("key"))
         return render_template("admin_login.html", error=intento), (403 if intento else 200)
 
-    clave = request.args.get("key") or request.form.get("key") or ADMIN_KEY
+    clave = _admin_key_from_request() or ADMIN_KEY
     return render_template("admin.html", event_name=app.config.get("CURRENT_EVENT_NAME", EVENT_NAME), marca=MARCA, admin_key=clave)
+
+
+@app.route("/admin/videos", methods=["GET", "POST"])
+def admin_videos_page():
+    blocked = _admin_gate()
+    if blocked:
+        return blocked
+    return render_template("admin_videos.html", admin_key=_admin_key_from_request())
 
 
 @app.route("/api/admin/entrega", methods=["GET", "POST"])
@@ -787,9 +838,16 @@ _event_source = EventSource(_delivery, _reset_event_runtime, close_runtime=_clos
                             closure_messages=_persistent_event_messages)
 
 
+def release_event_lock_for_drive():
+    """El chequeo del evento ya se hizo. Drive no tiene que seguir trabando el candado."""
+    if getattr(g, "eventphotos_lock", False):
+        g.eventphotos_lock = False
+        _event_lock.release()
+
+
 @app.before_request
 def isolate_eventphotos_event():
-    if request.path not in {"/api/upload", "/api/photos", "/api/mensajes", "/", "/loop", "/saludos"}:
+    if request.path not in {"/api/upload", "/api/photos", "/api/mensajes", "/", "/loop", "/saludos", *screen_videos.SCREEN_EVENT_PATHS}:
         return None
     _event_lock.acquire()
     g.eventphotos_lock = True
@@ -797,12 +855,16 @@ def isolate_eventphotos_event():
         with _event_lock:
             config = _event_source.ensure(load_messages())
             if not config:
-                if request.path == "/api/upload":
+                if request.path in {"/api/upload", "/api/videos/session", "/api/videos/register"}:
                     return jsonify(ok=False, error="Todavía no hay un evento de Abrolista en curso."), 409
                 if request.path == "/api/photos":
                     return jsonify(photos=[])
                 if request.path == "/api/mensajes":
                     return jsonify(mensajes=[])
+                if request.path == "/api/videos":
+                    return jsonify(videos=[])
+                if request.path == "/api/loop-items":
+                    return jsonify(items=[])
             else:
                 # El título se obtiene de Abrolista, sin editar variables de Render por evento.
                 app.config["CURRENT_EVENT_NAME"] = config["name"]
@@ -823,6 +885,57 @@ def _restore_serialized():
         _restore_from_drive()
 
 
+class _ScreenDeps:
+    def drive(self):
+        return _drive_service
+
+    def delivery(self):
+        return _delivery
+
+    def data_folder(self):
+        return get_subfolder("Datos")
+
+    def video_folder(self):
+        return get_subfolder(screen_videos.FOLDER_NAME)
+
+    def vetoes(self):
+        return _photo_vetoes()
+
+    def photo_items(self):
+        return [
+            {"kind": "photo", "src": f"/photos/{path.name}", "ts": path.stat().st_mtime}
+            for path in _visible_photo_files()
+        ]
+
+    def check_admin(self):
+        return _check_admin()
+
+    def cache_dir(self):
+        return CACHE_DIR
+
+    def retention(self):
+        return RETENTION_SECONDS
+
+    def config(self):
+        return _delivery.config
+
+    def drive_request(self, url, method, body, headers):
+        if _drive_service is None:
+            raise RuntimeError("No hay Drive para guardar el video.")
+        return screen_videos.drive_http(_drive_service, url, method, body, headers)
+
+    def read_range(self, file_id, start, end):
+        return screen_videos.read_drive_range(_drive_service, file_id, start, end)
+
+    def deliver_video(self, file_id):
+        _update_delivery("video", file_id)
+
+    def release_event_lock(self):
+        release_event_lock_for_drive()
+
+
+screen_videos.register_screen_videos(app, _ScreenDeps())
+
 threading.Thread(target=_restore_serialized, daemon=True).start()
 
 
@@ -831,7 +944,7 @@ if __name__ == "__main__":
     print(f"Subida (invitados): http://0.0.0.0:{PORT}/")
     print(f"Loop fotos (OBS):   http://0.0.0.0:{PORT}/loop")
     print(f"Saludos (VJ):       http://0.0.0.0:{PORT}/saludos")
-    app.run(host="0.0.0.0", port=PORT, debug=False)
+    app.run(host="0.0.0.0", port=PORT, debug=False, threaded=True)
 
 
 

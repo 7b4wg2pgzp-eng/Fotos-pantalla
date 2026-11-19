@@ -59,6 +59,8 @@ class FakeDrive:
             if self.fail_read:
                 raise RuntimeError('simulated list failure')
             rows = list(self.rows.values())
+            if 'trashed = false' in q:
+                rows = [r for r in rows if not r.get('trashed')]
             parents = re.findall(r"'([^']+)' in parents", q)
             equal = re.findall(r"(?<![A-Za-z])name = '([^']*)'", q)
             contains = re.findall(r"name contains '([^']*)'", q)
@@ -133,8 +135,9 @@ class FakeDrive:
         return Request(execute)
 
     def copy(self, fileId, body, fields=None):
+        source = self.rows[fileId]
         return Request(lambda: self.add('copy-' + str(len(self.rows)), body['name'],
-                                        body['parents'][0], props=body['appProperties'], data=self.data[fileId]))
+                                        body['parents'][0], source['mimeType'], body.get('appProperties'), self.data[fileId]))
 
 
 class ModerationTests(unittest.TestCase):
@@ -267,6 +270,7 @@ class ModerationTests(unittest.TestCase):
         response = self.client.get('/photos/' + OTHER + '.jpg')
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.data, b'other-preview')
+        self.assertEqual(response.headers['Cache-Control'], 'private, max-age=43200, immutable')
         response.close()
 
     def test_direct_album_download_and_zip_exclude_vetoed_copies(self):

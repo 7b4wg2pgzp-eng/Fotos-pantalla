@@ -79,6 +79,80 @@ launchctl load ~/Library/LaunchAgents/com.nico.eventphotos.plist
 
 Para bajarlo: `launchctl unload ~/Library/LaunchAgents/com.nico.eventphotos.plist`
 
+## 6. Videos cortos
+
+En la página de subida, el invitado puede elegir un video de hasta 60 segundos
+y 100 MB (`mp4`, `mov` o `webm`). El celular lo manda directo a Drive con una
+sesión resumible: el servidor solo abre esa sesión y anota el video. Los
+bytes no pasan por gunicorn.
+
+En `/loop` se reproduce sin sonido, entero, con tope de 60 segundos. Cuando
+arranca, la foto de atrás se va con el mismo fundido del loop y queda solo el
+video con el marco, sobre el fondo transparente. Al terminar, sigue la foto
+que correspondía. Entra enseguida, igual que una foto: no hay un paso de
+aprobación. Si el navegador de la pantalla no lo puede reproducir (por
+ejemplo un `.mov` HEVC del iPhone), lo saltea y el archivo queda en Drive.
+
+El marco del video es el mismo de las fotos: borde sólido `rgb(232, 196, 104)`,
+con un grosor de 10 px o el 1,2 % del lado mayor, el que sea más grande. El
+video más el marco entran en la pantalla.
+
+El VJ solo captura `/loop` en OBS o vMix. No tiene otra página ni controles.
+En `/admin/videos` (con la misma `ADMIN_KEY`) Nico ve los videos del más
+nuevo al más viejo, con el saludo o el nombre, la duración y la hora. Puede
+ver la vista previa, bajar el original, marcarlos como vistos o borrarlos.
+Borrar también los saca de `/loop` y del álbum.
+
+Quedan en la carpeta `Videos pantalla`, al lado de `Originales`. No se mezclan
+con la limpieza de las fotos. La subida usa la misma conexión de Drive. No
+hay una variable nueva.
+
+Al registrarse, el video también se copia a `Entregas/<fiesta>/Videos`, que es
+la carpeta que el álbum del cliente ya muestra, reproduce por rangos y mete en
+el ZIP. Si Nico lo borra desde el moderador, o tira el original a la papelera
+de Drive, la copia sale del álbum. La limpieza
+de `Originales` no mira `Videos pantalla` y no espera esa copia para borrar las
+fotos.
+
+El álbum lo sirve otro proceso, `abrolista-album.service`, en la VM de Oracle.
+No hace falta una variable nueva. Para que un video borrado no aparezca aunque
+Drive no haya terminado de eliminarlo, hay que publicar esta revisión en esa
+VM (no se hace sola con Render):
+
+```bash
+sudo bash ops/deploy_album.sh SHA_COMPLETO_DE_40_CARACTERES
+```
+
+Ese script baja el SHA, corre las pruebas del álbum y reinicia el servicio.
+Si falla, vuelve a la versión anterior. No toca `/etc/abrolista-album.env`.
+
+El `Procfile` deja un solo proceso de gunicorn con 4 hilos y un timeout de
+120 segundos. Hace falta: el worker por defecto es síncrono y corta a los 30
+segundos, así que un video de hasta 60 segundos dejaría trabada la única
+petición y no podría entrar una foto al mismo tiempo. Cuatro hilos alcanzan
+para el loop, una subida y los avisos, sin subir la memoria del plan
+gratuito (512 MB).
+
+### Transcodificar más adelante (VPS, no Render Free)
+
+`transcode_for_screen()` en `screen_videos.py` devuelve `None` a propósito.
+No bajes el video a Render para convertirlo: no entra en la memoria del plan
+gratuito y el disco se borra en cada reinicio. En un VPS con ffmpeg se puede
+dejar una copia H.264 720p, yuv420p, con `+faststart` y un poster, sin borrar
+el original:
+
+```bash
+ffmpeg -y -i entrada.mov -vf "scale=-2:720" -c:v libx264 -preset veryfast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 128k -movflags +faststart salida.mp4
+ffmpeg -y -i salida.mp4 -ss 1 -frames:v 1 poster.jpg
+```
+
+Para probar en local, con Drive simulado:
+
+```bash
+python3 -m unittest tests.test_screen_videos -v
+node tests/test_video_upload.js
+```
+
 ## Notas técnicas
 
 - Todas las fotos se convierten a JPG, se corrige la rotación (EXIF) y se

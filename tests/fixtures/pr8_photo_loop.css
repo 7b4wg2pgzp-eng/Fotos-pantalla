@@ -1,0 +1,40 @@
+
+  :root{
+    color-scheme: dark;
+    --noir:#040306;
+    --gold:#d9a441;
+    --gold-lit:#f6e0a4;
+  }
+  html,body{
+    margin:0; padding:0; width:100%; height:100%;
+        background:transparent;
+    overflow:hidden;
+  }
+  .stage{ position:relative; width:100vw; height:100vh; }
+  .slide{
+    position:absolute; inset:0;
+    background-size:contain;
+    background-repeat:no-repeat;
+    background-position:center;
+    opacity:0;
+    transition:opacity 1.5s ease;
+  }
+  .slide.active{ opacity:1; }
+  .vignette{
+    position:absolute; inset:0;
+    pointer-events:none;
+    background:
+      radial-gradient(ellipse at 50% 0%, rgba(217,164,65,.07), transparent 60%);
+  }
+  .empty{
+    position:absolute; inset:0;
+    display:flex; align-items:center; justify-content:center;
+    font-family:'Barlow Condensed', sans-serif;
+    text-transform:uppercase;
+    letter-spacing:.34em;
+    font-size:20px;
+    color:rgba(246,224,164,.34);
+  }
+  @media (prefers-reduced-motion: reduce){
+    .slide{ transition:none; }
+  }

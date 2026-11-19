@@ -47,59 +47,114 @@
     .slide{ transition:none; }
   }
 </style>
+<style>
+  .clip-frame{
+    display:none;
+    position:absolute;
+    left:50%;
+    top:50%;
+    transform:translate(-50%, -50%);
+    box-sizing:border-box;
+    border-style:solid;
+    border-color:rgb(232, 196, 104);
+    z-index:2;
+    background:transparent;
+    pointer-events:none;
+  }
+  .clip-frame.playing{ display:block; }
+  .clip-frame .clip{
+    display:block;
+    width:100%;
+    height:100%;
+    object-fit:fill;
+    background:#000;
+  }
+  .vignette{ z-index:3; }
+</style>
 </head>
 <body>
   <div class="stage" id="stage">
     <div class="empty" id="empty">Esperando fotos</div>
+    <div class="clip-frame" id="clipFrame">
+      <video class="clip" id="clip" muted playsinline preload="none"></video>
+    </div>
     <div class="vignette"></div>
   </div>
 
+<script src="/static/screen_loop_videos.js"></script>
 <script>
   const stage = document.getElementById('stage');
   const emptyMsg = document.getElementById('empty');
   const HOLD_MS = 25000;
   const FETCH_EVERY_MS = 8000;
 
-  let photos = [];
+  let photos = [];          // orden de llegada, como lo da /api/photos
   let index = 0;
-  let slideEls = [];
+  const slides = new Map();  // src -> <div>, para no recrear (ni volver a bajar) lo que ya está
+  const pendientes = [];     // fotos nuevas: salen antes que repetir las viejas
+  let primeraCarga = true;
+  let fallos = 0;
 
   async function refreshPhotos() {
+    const ctl = new AbortController();
+    const t = setTimeout(() => ctl.abort(), 15000);
     try {
-      const res = await fetch('/api/photos', { cache: 'no-store' });
+      const res = await fetch('/api/photos', { cache: 'no-store', signal: ctl.signal });
+      if (!res.ok) throw new Error('HTTP ' + res.status);
       const data = await res.json();
-      if (JSON.stringify(data.photos) !== JSON.stringify(photos)) {
-        photos = data.photos;
-        rebuildSlides();
-      }
-    } catch (e) { /* silencioso */ }
+      if (!Array.isArray(data.photos)) throw new Error('lista');
+      fallos = 0;
+      syncSlides(data.photos);
+    } catch (e) {
+      // Si el servidor se cae o está despertando, se sigue mostrando lo que ya hay
+      // y se reintenta con espera creciente (máx. 60 s).
+      fallos++;
+    } finally {
+      clearTimeout(t);
+    }
+    setTimeout(refreshPhotos, Math.min(FETCH_EVERY_MS * Math.max(1, fallos), 60000));
   }
 
-  function rebuildSlides() {
-    slideEls.forEach(el => el.remove());
+  function syncSlides(lista) {
     const vignette = stage.querySelector('.vignette');
-    slideEls = photos.map(src => {
+    const nuevas = new Set(lista);
+    // Sacar las que ya no están (moderadas o vencidas), sin tocar el resto.
+    for (const [src, el] of slides) {
+      if (!nuevas.has(src)) { el.remove(); slides.delete(src); }
+    }
+    for (const src of lista) {
+      if (slides.has(src)) continue;
       const el = document.createElement('div');
       el.className = 'slide';
       el.style.backgroundImage = `url("${src}")`;
       stage.insertBefore(el, vignette);
-      return el;
-    });
+      slides.set(src, el);
+      if (!primeraCarga) pendientes.push(src);
+    }
+    primeraCarga = false;
+    photos = lista;
     emptyMsg.style.display = photos.length ? 'none' : 'flex';
     index = Math.min(index, Math.max(photos.length - 1, 0));
   }
 
   function showNext() {
-    if (!slideEls.length) return;
-    slideEls.forEach(el => el.classList.remove('active'));
-    const el = slideEls[index];
+    if (!photos.length) return;
+    let src;
+    while (pendientes.length && !slides.has(pendientes[0])) pendientes.shift();
+    if (pendientes.length) {
+      src = pendientes.shift();          // lo recién subido va en el próximo cambio
+    } else {
+      src = photos[index % photos.length];
+      index = (index + 1) % photos.length;
+    }
+    for (const el of slides.values()) el.classList.remove('active');
+    const el = slides.get(src);
+    if (!el) return;
     void el.offsetWidth;
     el.classList.add('active');
-    index = (index + 1) % slideEls.length;
   }
 
   refreshPhotos();
-  setInterval(refreshPhotos, FETCH_EVERY_MS);
   setInterval(showNext, HOLD_MS);
 </script>
 </body>

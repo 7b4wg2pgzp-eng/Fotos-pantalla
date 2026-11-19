@@ -39,6 +39,14 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 <a id="deliveryLink" hidden target="_blank" rel="noopener">Abrir álbum para compartir</a>
 <p>Las fotos para pantalla siguen disponibles durante 12 horas. La entrega conserva sus copias después de ese plazo. Al comenzar una fiesta nueva, se limpia la pantalla y se reinician los saludos. Los originales y las entregas anteriores se conservan. Compartí únicamente la carpeta de esa fiesta desde Drive.</p>
 </section>
+<h2>Videos en pantalla</h2>
+<form method="post" action="/admin/videos">
+  <input type="hidden" name="key" id="videosKey">
+  <button type="submit">Ver videos</button>
+</form>
+<p class="vacio">Salen en la pantalla igual que las fotos, y los podés borrar. Si el navegador no reproduce uno (por ejemplo un MOV del iPhone), la pantalla lo saltea y el archivo queda en Drive.</p>
+<div id="pendingVideoDeletes" role="status" aria-live="polite"></div>
+<div id="videos"></div>
 <h2>Fotos en pantalla</h2>
 <div id="pendingDeletes" role="status" aria-live="polite"></div>
 <div class="grid" id="fotos"></div>
@@ -55,6 +63,7 @@ h2{font-size:17px;margin:28px 0 12px;color:#E8C468;}
 
 <script>
 const KEY = {{ admin_key|tojson }};
+document.getElementById('videosKey').value = KEY;
 const deliveryStatus = document.getElementById('deliveryStatus');
 const deliveryLink = document.getElementById('deliveryLink');
 const deliveryButton = document.getElementById('reconcileDelivery');
@@ -112,9 +121,10 @@ btnBorrar.addEventListener('click', () => {
 document.addEventListener('keydown', e => { if (e.key === 'Escape') cerrar(); });
 
 async function cargar() {
-  const [pf, pm] = await Promise.all([
+  const [pf, pm, pv] = await Promise.all([
     fetch('/api/photos', {cache:'no-store'}).then(r => r.json()),
-    fetch('/api/mensajes', {cache:'no-store'}).then(r => r.json())
+    fetch('/api/mensajes', {cache:'no-store'}).then(r => r.json()),
+    fetch('/api/videos', {cache:'no-store'}).then(r => r.json()).catch(() => ({videos: []}))
   ]);
 
   const cf = document.getElementById('fotos');
@@ -133,6 +143,24 @@ async function cargar() {
     b.onclick = () => borrar('/api/admin/borrar-foto', {nombre});
     d.append(img, b);
     cf.appendChild(d);
+  });
+
+  const cv = document.getElementById('videos');
+  cv.replaceChildren();
+  const videos = Array.isArray(pv.videos) ? pv.videos : [];
+  if (!videos.length) cv.appendChild(Object.assign(document.createElement('p'), {className: 'vacio', textContent: 'Sin videos.'}));
+  videos.forEach(video => {
+    if (!/^[0-9a-f]{32}$/.test(video.uid || '')) return;
+    const row = document.createElement('div');
+    row.className = 'msg';
+    const text = document.createElement('div');
+    const mb = (Number(video.size) || 0) / (1024 * 1024);
+    text.textContent = `Video · ${Math.max(0, Math.round(Number(video.duration) || 0))} s · ${mb.toFixed(1)} MB`;
+    const button = document.createElement('button');
+    button.textContent = 'Borrar';
+    button.onclick = () => borrarVideo(video.uid);
+    row.append(text, button);
+    cv.appendChild(row);
   });
 
   const cm = document.getElementById('mensajes');
@@ -202,6 +230,50 @@ async function borrar(url, datos) {
 
 cargar();
 setInterval(cargar, 10000);
+
+const pendingVideos = new Set();
+try {
+  for (const uid of JSON.parse(localStorage.getItem('pendingVideoDeletes') || '[]')) {
+    if (/^[0-9a-f]{32}$/.test(uid)) pendingVideos.add(uid);
+  }
+} catch (error) {}
+function showPendingVideos() {
+  try { localStorage.setItem('pendingVideoDeletes', JSON.stringify([...pendingVideos])); } catch (error) {}
+  const container = document.getElementById('pendingVideoDeletes');
+  if (!container) return;
+  container.replaceChildren();
+  for (const uid of pendingVideos) {
+    const button = document.createElement('button');
+    button.textContent = 'Reintentar eliminación del video';
+    button.onclick = () => borrarVideo(uid);
+    container.appendChild(button);
+  }
+}
+
+async function borrarVideo(uid) {
+  if (!/^[0-9a-f]{32}$/.test(uid || '')) return;
+  if (!confirm('Borrar definitivamente?')) return;
+  pendingVideos.add(uid);
+  showPendingVideos();
+  const fd = new FormData();
+  fd.append('key', KEY);
+  fd.append('uid', uid);
+  try {
+    const response = await fetch('/api/admin/borrar-video', {method:'POST', body: fd});
+    const result = await response.json();
+    if (!response.ok || !result.ok) {
+      alert(result.error || 'No se completó la eliminación. Volvé a intentar.');
+      return;
+    }
+  } catch (error) {
+    alert('No se pudo confirmar la eliminación. Volvé a intentar.');
+    return;
+  }
+  pendingVideos.delete(uid);
+  showPendingVideos();
+  cargar();
+}
+showPendingVideos();
 </script>
 </body>
 </html>
