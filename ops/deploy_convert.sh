@@ -29,7 +29,8 @@ if ! command -v ffmpeg >/dev/null || ! command -v ffprobe >/dev/null; then
   apt-get update -q
   DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends ffmpeg
 fi
-ffmpeg -hide_banner -encoders 2>/dev/null | grep -q libx264 || { echo 'ffmpeg sin libx264.' >&2; exit 1; }
+ENCODERS="$(ffmpeg -hide_banner -encoders 2>/dev/null || true)"
+case "${ENCODERS}" in *libx264*) ;; *) echo 'ffmpeg sin libx264.' >&2; exit 1 ;; esac
 
 STAGE="$(mktemp -d)"
 trap 'rm -rf -- "${STAGE}"' EXIT
