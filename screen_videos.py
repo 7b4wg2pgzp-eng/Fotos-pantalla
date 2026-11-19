@@ -473,7 +473,6 @@ def register_upload(uid, size, duration, nombre="", saludo=""):
             stored_size = 0
         if stored_size != size:
             raise ValueError("video")
-        _reject_hevc_file(stored["id"], size)
         row = {
             "uid": uid,
             "name": f"{uid}.{ext}",

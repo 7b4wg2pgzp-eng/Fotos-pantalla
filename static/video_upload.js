@@ -125,7 +125,7 @@ function defaultProbe(file) {
 
 async function screenFormatError(file, hooks) {
   hooks = hooks || {};
-  if (await containerIsHevc(file)) return VIDEO_ERRORS.screen;
+  // HEVC (iPhone por defecto) se acepta: queda en Drive, álbum y moderador; el loop lo saltea si su navegador no lo reproduce.
   const mime = MIME_BY_EXT[extensionOf(file && file.name)];
   if (!mime) return null;
   const canPlay = hooks.canPlay || defaultCanPlay;

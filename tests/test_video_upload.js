@@ -129,7 +129,7 @@ async function fakePut(url, body, headers) {
   const seen = [];
   const hevcFile = fileFrom('iphone.mov', hevc, seen);
   assert.equal(await upload.containerIsHevc(hevcFile), true);
-  assert.equal(await upload.screenFormatError(hevcFile, {canPlay: () => 'maybe', probe: async () => true}), upload.VIDEO_ERRORS.screen);
+  assert.equal(await upload.screenFormatError(hevcFile, {canPlay: () => 'maybe', probe: async () => true}), null);
   assert.ok(seen.every(([start]) => start < 24 || start >= 88));
   const avc = concat([
     box([0x66, 0x74, 0x79, 0x70], new Uint8Array([0x69, 0x73, 0x6f, 0x6d, 0, 0, 0, 0])),

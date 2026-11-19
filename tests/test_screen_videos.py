@@ -411,7 +411,7 @@ class ScreenVideoTests(unittest.TestCase):
             chunks.append((8 + len(payload)).to_bytes(4, "big") + kind + payload)
         return b"".join(chunks)
 
-    def test_register_rejects_hevc_and_does_not_publish_it(self):
+    def test_register_accepts_hevc_from_iphone(self):
         hevc = self._mp4(
             (b"ftyp", b"isom" + b"\x00\x00\x00\x00"),
             (b"mdat", b"\x00" * 32),
@@ -426,11 +426,9 @@ class ScreenVideoTests(unittest.TestCase):
 
         with patch.object(self.videos.deps, "read_range", read_range):
             response = self.register(size=len(hevc))
-        self.assertEqual(response.status_code, 400)
-        self.assertEqual(response.json["error"], self.videos.SCREEN_FORMAT_MESSAGE)
-        self.assertEqual(self.client.get("/api/videos").json["videos"], [])
-        self.assertNotIn(FILE_ID, self.drive.rows)
-        self.assertTrue(any(end < start + 16 or start >= len(hevc) - 16 for _file, start, end in self.reads))
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(len(self.client.get("/api/videos").json["videos"]), 1)
+        self.assertIn(FILE_ID, self.drive.rows)
         plain = self._mp4((b"ftyp", b"isom" + b"\x00\x00\x00\x00"), (b"moov", b"stsd" + b"avc1"))
         self.assertFalse(self.videos.declares_hevc(lambda start, length: plain[start:start + length], len(plain)))
         self.assertTrue(self.videos.declares_hevc(lambda start, length: hevc[start:start + length], len(hevc)))
@@ -485,7 +483,7 @@ class ScreenVideoTests(unittest.TestCase):
 
         with patch.object(self.videos.deps, "read_range", read_range):
             self.assertEqual(self.register().status_code, 200)
-        self.assertEqual(seen, [True, True])
+        self.assertEqual(seen, [True])
         with patch.object(self.screen._event_source, "ensure", return_value=None):
             closed = self.session()
         self.assertEqual(closed.status_code, 409)
