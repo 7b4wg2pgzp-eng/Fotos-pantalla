@@ -4,6 +4,7 @@ import time
 import uuid
 import json
 import hmac
+import hashlib
 import base64
 import threading
 import mimetypes
@@ -585,11 +586,50 @@ def _admin_key_from_request() -> str:
     return request.headers.get("X-Admin-Key") or request.args.get("key") or request.form.get("key") or ""
 
 
+# La clave que ya se había elegido desde la web (antes del #8) sigue entrando.
+# Solo se lee: ya no se puede crear ni cambiar desde /admin.
+ADMIN_STATE_NAME = "admin-" + (os.environ.get("RENDER_SERVICE_ID") or "local") + ".json"
+ADMIN_STATE_FILE = CACHE_DIR / ADMIN_STATE_NAME
+
+
+def _admin_hash(clave: str, salt: str) -> str:
+    return hashlib.pbkdf2_hmac("sha256", clave.encode(), salt.encode(), 200_000).hex()
+
+
+def _admin_state():
+    if ADMIN_STATE_FILE.exists():
+        try:
+            with open(ADMIN_STATE_FILE, encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    try:
+        fid = _drive_find_id(ADMIN_STATE_NAME, get_subfolder("Datos"))
+    except Exception:
+        fid = None
+    if fid:
+        datos = drive_download(fid)
+        if datos:
+            try:
+                estado = json.loads(datos)
+            except Exception:
+                return None
+            with open(ADMIN_STATE_FILE, "wb") as f:
+                f.write(datos)
+            return estado
+    return None
+
+
 def _check_admin():
     clave = _admin_key_from_request()
     if not ADMIN_KEY or not clave:
         return False
-    return hmac.compare_digest(clave, ADMIN_KEY)
+    if hmac.compare_digest(clave, ADMIN_KEY):
+        return True
+    estado = _admin_state()
+    if not estado or not estado.get("salt") or not estado.get("hash"):
+        return False
+    return hmac.compare_digest(_admin_hash(clave, estado["salt"]), estado["hash"])
 
 
 def _admin_gate():
