@@ -94,7 +94,9 @@ function fila(video) {
   const meta = document.createElement('div');
   meta.className = 'meta';
   const segundos = Math.max(0, Math.round(Number(video.duration) || 0));
-  meta.textContent = segundos + ' s · ' + hora(video.ts) + (video.seen ? ' · visto' : '');
+  const pantalla = video.pantalla === 'pending' ? ' · preparando para pantalla'
+    : video.pantalla === 'failed' ? ' · no se pudo preparar para pantalla' : '';
+  meta.textContent = segundos + ' s · ' + hora(video.ts) + (video.seen ? ' · visto' : '') + pantalla;
   info.append(saludo, meta);
   const botones = document.createElement('div');
   botones.className = 'botones';

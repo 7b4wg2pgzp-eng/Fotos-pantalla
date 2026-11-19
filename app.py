@@ -938,6 +938,9 @@ class _ScreenDeps:
     def video_folder(self):
         return get_subfolder(screen_videos.FOLDER_NAME)
 
+    def convert_folder(self):
+        return get_subfolder(screen_videos.CONVERT_FOLDER_NAME)
+
     def vetoes(self):
         return _photo_vetoes()
 
