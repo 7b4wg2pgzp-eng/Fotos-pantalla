@@ -48,7 +48,7 @@ printf '%s\n' "${REVISION}" > "${APP}/REVISION"
 install -m 0644 "${STAGE}/src/ops/fotospantalla-convert.service" "${UNIT}"
 
 echo 'Probando Drive y la configuración...'
-sudo -u abrolista-album bash -c "set -a; . /etc/abrolista-album.env; . ${ENV_FILE}; set +a; HOME=/tmp ${PY} ${APP}/screen_convert_worker.py --check"
+bash -c "set -a; . /etc/abrolista-album.env; . ${ENV_FILE}; set +a; HOME=/tmp exec runuser -u abrolista-album -- ${PY} ${APP}/screen_convert_worker.py --check"
 
 systemctl daemon-reload
 systemctl enable fotospantalla-convert.service
