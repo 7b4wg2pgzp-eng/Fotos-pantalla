@@ -29,6 +29,12 @@ function concealSlides(doc) {
   for (let i = 0; i < visible.length; i += 1) visible[i].classList.remove("active");
 }
 
+// Si el original no se pudo decodificar y después llega la copia H.264
+// (pantalla pasa a "ready"), se vuelve a intentar.
+function skipKey(video) {
+  return video.uid + "|" + (video.mime || "") + "|" + (video.pantalla || "");
+}
+
 function createTurnClock(opts) {
   const holdMs = opts.holdMs;
   const showNext = opts.showNext;
@@ -47,7 +53,7 @@ function createTurnClock(opts) {
   const skipped = new Set();
 
   function playable() {
-    return videos.filter((video) => video && video.uid && !skipped.has(video.uid));
+    return videos.filter((video) => video && video.uid && !skipped.has(skipKey(video)));
   }
 
   function videoDue() {
@@ -71,7 +77,7 @@ function createTurnClock(opts) {
     settled = true;
     currentUid = null;
     stopCurrent = null;
-    if (video && reason === "decode") skipped.add(video.uid);
+    if (video && reason === "decode") skipped.add(skipKey(video));
     busy = false;
     showNext();
     arm();
@@ -238,6 +244,7 @@ function attachLoop(doc, win) {
         mime: row && row.mime,
         ts: row && row.ts,
         playable: row && row.playable,
+        pantalla: row && row.pantalla,
       })).filter(validLoopVideo).sort((a, b) => (a.ts || 0) - (b.ts || 0));
       publish(list);
     } catch (error) { /* la pantalla sigue con las fotos */ }

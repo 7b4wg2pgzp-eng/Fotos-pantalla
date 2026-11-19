@@ -195,7 +195,7 @@ class ScreenVideoTests(unittest.TestCase):
         self.assertTrue(first.json["ok"] and second.json["ok"])
         run.assert_not_called()
         self.assertNotIn(FILE_ID, downloads)
-        self.assertIsNone(self.videos.transcode_for_screen({"uid": UID}, self.drive))
+        self.assertEqual(self.videos.convert_token(), "")
         listed = self.client.get("/api/videos").json["videos"]
         self.assertEqual(listed[0]["uid"], UID)
         self.assertNotIn("file_id", listed[0])
@@ -487,6 +487,153 @@ class ScreenVideoTests(unittest.TestCase):
         with patch.object(self.screen._event_source, "ensure", return_value=None):
             closed = self.session()
         self.assertEqual(closed.status_code, 409)
+
+    # ------------------------------------------------------------ copia H.264
+
+    TOKEN = "t" * 40
+
+    def _converter_on(self):
+        env = patch.dict("os.environ", {"SCREEN_CONVERT_TOKEN": self.TOKEN})
+        env.start()
+        self.addCleanup(env.stop)
+        self.drive.add("copies", self.videos.CONVERT_FOLDER_NAME, "root", "application/vnd.google-apps.folder")
+        folder = patch.object(self.videos.deps, "convert_folder", lambda: "copies", create=True)
+        folder.start()
+        self.addCleanup(folder.stop)
+
+        def read_range(file_id, start, end):
+            self.reads.append((file_id, start, end))
+            return self.drive.data[file_id][start:end + 1]
+
+        reader = patch.object(self.videos.deps, "read_range", read_range)
+        reader.start()
+        self.addCleanup(reader.stop)
+
+    def _register_hevc(self, uid=UID):
+        hevc = self._mp4(
+            (b"ftyp", b"qt  " + b"\x00\x00\x00\x00"),
+            (b"mdat", b"\x00" * 32),
+            (b"moov", b"stsd" + b"hvc1"),
+        )
+        self.add_video(uid=uid, data=hevc)
+        response = self.register(uid=uid, size=len(hevc))
+        self.assertEqual(response.status_code, 200)
+        return hevc
+
+    def _done(self, uid=UID, token=None, **payload):
+        headers = {"Authorization": "Bearer " + (self.TOKEN if token is None else token)}
+        return self.client.post(f"/api/convert/{uid}/listo", json=payload, headers=headers)
+
+    def _loop_videos(self):
+        return [item for item in self.client.get("/api/loop-items").json["items"] if item.get("kind") == "video"]
+
+    def test_codec_check_only_flags_non_h264(self):
+        def reader(data):
+            return lambda start, length: data[start:start + length]
+
+        avc = self._mp4((b"ftyp", b"isom"), (b"mdat", b"x" * 20), (b"moov", b"stsd" + b"avc1"))
+        hevc = self._mp4((b"ftyp", b"qt  "), (b"mdat", b"x" * 20), (b"moov", b"stsd" + b"hvc1"))
+        other = self._mp4((b"ftyp", b"qt  "), (b"moov", b"stsd" + b"apcn"))
+        no_moov = self._mp4((b"ftyp", b"isom"), (b"mdat", b"x" * 20))
+        self.assertFalse(self.videos.needs_screen_copy(reader(avc), len(avc), "mp4"))
+        self.assertTrue(self.videos.needs_screen_copy(reader(hevc), len(hevc), "mov"))
+        self.assertTrue(self.videos.needs_screen_copy(reader(other), len(other), "mov"))
+        self.assertFalse(self.videos.needs_screen_copy(reader(no_moov), len(no_moov), "mp4"))
+        self.assertFalse(self.videos.needs_screen_copy(reader(hevc), len(hevc), "webm"))
+
+    def test_without_token_hevc_plays_the_original_like_before(self):
+        self._register_hevc()
+        self.assertEqual([item["uid"] for item in self._loop_videos()], [UID])
+        self.assertEqual(self.client.get("/api/videos").json["videos"][0]["pantalla"], "original")
+        self.assertEqual(self._done(file_id="x" * 20, size=5).status_code, 404)
+        self.assertEqual(self.client.post(f"/api/convert/{UID}/fallo").status_code, 404)
+
+    def test_h264_is_not_held_back_when_converter_is_on(self):
+        self._converter_on()
+        plain = self._mp4((b"ftyp", b"isom"), (b"mdat", b"x" * 20), (b"moov", b"stsd" + b"avc1"))
+        self.add_video(data=plain)
+        self.assertEqual(self.register(size=len(plain)).status_code, 200)
+        self.assertEqual([item["uid"] for item in self._loop_videos()], [UID])
+        self.assertEqual(self.client.get("/api/videos").json["videos"][0]["pantalla"], "original")
+
+    def test_hevc_waits_for_the_h264_copy_and_the_original_stays(self):
+        self._converter_on()
+        hevc = self._register_hevc()
+        self.assertEqual(self._loop_videos(), [])
+        listed = self.client.get("/api/admin/videos", headers={"X-Admin-Key": "test-key"}).json["videos"]
+        self.assertEqual(listed[0]["pantalla"], "pending")
+        copy = b"h264-copy-bytes"
+        self.assertEqual(self._done(token="wrong" * 10, file_id="copyfile123", size=len(copy)).status_code, 403)
+        self.assertEqual(self.client.post(f"/api/convert/{UID}/listo", json={}).status_code, 403)
+        # Todavía no está en Drive, o está en otra carpeta: no se publica.
+        self.assertEqual(self._done(file_id="copyfile123", size=len(copy)).status_code, 503)
+        self.drive.add("copyfile123", UID + ".mp4", "screen", "video/mp4", data=copy)
+        self.assertEqual(self._done(file_id="copyfile123", size=len(copy)).status_code, 400)
+        self.drive.rows["copyfile123"]["parents"] = ["copies"]
+        self.assertEqual(self._done(file_id="copyfile123", size=len(copy) + 1).status_code, 400)
+        self.assertEqual(self._loop_videos(), [])
+        done = self._done(file_id="copyfile123", size=len(copy))
+        self.assertEqual(done.status_code, 200)
+        self.assertEqual(self._done(file_id="copyfile123", size=len(copy)).status_code, 200)
+        loop = self._loop_videos()
+        self.assertEqual([item["uid"] for item in loop], [UID])
+        self.assertEqual(loop[0]["mime"], "video/mp4")
+        self.assertNotIn("copyfile123", self.client.get("/api/loop-items").get_data(as_text=True))
+        played = self.client.get("/videos/" + UID)
+        self.assertEqual(played.get_data(), copy)
+        self.assertEqual(played.mimetype, "video/mp4")
+        ranged = self.client.get("/videos/" + UID, headers={"Range": "bytes=0-3"})
+        self.assertEqual(ranged.headers["Content-Range"], f"bytes 0-3/{len(copy)}")
+        original = self.client.get("/videos/" + UID + "?descarga=1")
+        self.assertEqual(original.get_data(), hevc)
+        self.assertIn(FILE_ID, self.drive.rows)
+        public = self.client.get("/api/videos").json["videos"][0]
+        self.assertEqual((public["pantalla"], public["playable"], public["mime"]), ("ready", True, "video/mp4"))
+        # El registro sigue siendo legible por la versión anterior de la app.
+        raw = next(fid for fid, row in self.drive.rows.items() if row["name"] == "pantalla-videos.json")
+        stored = json.loads(self.drive.data[raw])["videos"][0]
+        self.assertTrue(self.videos._valid_row(stored))
+        self.assertEqual(stored["file_id"], FILE_ID)
+        self.assertEqual(stored["screen"]["file_id"], "copyfile123")
+
+    def test_failed_or_slow_conversion_falls_back_to_the_original(self):
+        self._converter_on()
+        self._register_hevc()
+        self.assertEqual(self._loop_videos(), [])
+        later = time.time() + self.videos.PENDING_FALLBACK_SECONDS + 1
+        with patch.object(self.videos.time, "time", lambda: later):
+            self.assertEqual([item["uid"] for item in self._loop_videos()], [UID])
+            self.assertTrue(self.client.get("/api/videos").json["videos"][0]["playable"])
+        failed = self.client.post(f"/api/convert/{UID}/fallo", headers={"Authorization": "Bearer " + self.TOKEN})
+        self.assertEqual(failed.status_code, 200)
+        public = self.client.get("/api/videos").json["videos"][0]
+        self.assertEqual((public["pantalla"], public["playable"], public["mime"]), ("failed", True, "video/mp4"))
+        loop = self._loop_videos()
+        self.assertEqual([item["uid"] for item in loop], [UID])
+        self.assertEqual(self.client.get("/videos/" + UID).get_data()[4:8], b"ftyp")
+        self.assertEqual(self.client.post(f"/api/convert/{'f' * 32}/fallo",
+                                          headers={"Authorization": "Bearer " + self.TOKEN}).status_code, 410)
+
+    def test_deleting_a_video_also_removes_its_screen_copy(self):
+        self._converter_on()
+        self._register_hevc()
+        self.drive.add("copyfile123", UID + ".mp4", "copies", "video/mp4", data=b"copy")
+        self.assertEqual(self._done(file_id="copyfile123", size=4).status_code, 200)
+        gone = self.client.post("/api/admin/borrar-video", data=dict(uid=UID, key="test-key"))
+        self.assertEqual(gone.status_code, 200)
+        self.assertNotIn("copyfile123", self.drive.rows)
+        self.assertNotIn(FILE_ID, self.drive.rows)
+        self.assertEqual(self.client.get("/videos/" + UID).status_code, 404)
+
+    def test_copy_that_arrives_after_moderation_is_discarded(self):
+        self._converter_on()
+        self._register_hevc()
+        self.assertEqual(self.client.post("/api/admin/borrar-video", data=dict(uid=UID, key="test-key")).status_code, 200)
+        self.drive.add("latecopy123", UID + ".mp4", "copies", "video/mp4", data=b"late")
+        late = self._done(file_id="latecopy123", size=4)
+        self.assertEqual(late.status_code, 410)
+        self.assertNotIn("latecopy123", self.drive.rows)
+        self.assertEqual(self._loop_videos(), [])
 
 
 if __name__ == "__main__":

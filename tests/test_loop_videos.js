@@ -71,6 +71,31 @@ skips.clock.tick();
 assert.equal(skips.playing.video.uid, broken);
 assert.deepEqual(skips.calls.at(-1), 'photo');
 
+// El original HEVC no decodificó; llega la copia H.264 (otro mime) y se reintenta.
+let turns = 0;
+const retried = player.createTurnClock({
+  holdMs: 25000,
+  showNext: () => {},
+  setInterval: () => 1,
+  clearInterval: () => {},
+  play: (video, done) => { turns += 1; retried.last = {video, done}; },
+});
+const hevcUid = 'c'.repeat(32);
+retried.setVideos([{uid: hevcUid, src: '/videos/' + hevcUid, mime: 'video/mp4', pantalla: 'failed'}]);
+retried.tick();
+retried.tick();
+assert.equal(turns, 1);
+retried.last.done('decode');
+retried.tick();
+retried.tick();
+assert.equal(turns, 1);
+retried.setVideos([{uid: hevcUid, src: '/videos/' + hevcUid, mime: 'video/mp4', pantalla: 'ready'}]);
+retried.tick();
+retried.tick();
+assert.equal(turns, 2);
+assert.equal(retried.last.video.mime, 'video/mp4');
+assert.equal(player.validLoopVideo({uid: hevcUid, src: '/videos/' + hevcUid, mime: 'video/mp4', playable: false}), false);
+
 function classList(names) {
   const set = new Set(names);
   return {

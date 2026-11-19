@@ -8,10 +8,16 @@ La moderación es la de las fotos: entra a la rotación ni bien queda
 registrado y /admin lo puede borrar. No hay cola de aprobación previa
 porque las fotos tampoco la tienen.
 
-Transcodificar (H.264 720p, faststart, poster) no entra en Render Free.
-transcode_for_screen() es el gancho para hacerlo después en un VPS.
+Transcodificar no entra en Render Free. Si SCREEN_CONVERT_TOKEN está en el
+entorno, un video que no es H.264 (el HEVC del iPhone) queda "pendiente" y no
+sale en /loop hasta que el worker del VPS (screen_convert_worker.py) sube una
+copia H.264 a "Videos pantalla H264" y avisa con ese token. El original sigue
+en "Videos pantalla" para el álbum y el moderador. Solo esta app escribe el
+registro: el worker lo lee, nunca lo modifica.
 """
+import hmac
 import json
+import os
 import re
 import threading
 import time
@@ -38,6 +44,15 @@ MANIFEST_NAME = "pantalla-videos.json"
 # No usar "Videos" (eso es el álbum) ni "Originales" (la limpieza de fotos
 # exige una copia de cada archivo de esa carpeta).
 FOLDER_NAME = "Videos pantalla"
+# Copias H.264 para la pantalla. Carpeta aparte: la entrega al álbum solo copia
+# "Videos pantalla", así la copia nunca termina duplicada en el álbum.
+CONVERT_FOLDER_NAME = "Videos pantalla H264"
+CONVERT_TOKEN_ENV = "SCREEN_CONVERT_TOKEN"
+CONVERT_MIME = "video/mp4"
+# Si el worker no contesta en este tiempo, /loop prueba con el original
+# (como antes: si el navegador no lo decodifica, lo saltea).
+PENDING_FALLBACK_SECONDS = 15 * 60
+SCREEN_STATES = {"pending", "ready", "failed"}
 EXTS = {"mp4": "video/mp4", "mov": "video/quicktime", "webm": "video/webm"}
 SCREEN_EVENT_PATHS = {
     "/api/videos/session",
@@ -59,23 +74,10 @@ NAME_LIMIT = 40
 GREETING_LIMIT = 280
 
 
-def transcode_for_screen(record, drive):
-    """Gancho para un VPS. En Render Free tiene que devolver None.
-
-    No descargues el original acá: un video de hasta 100 MB no entra en los
-    512 MB del plan gratuito y el disco se borra en cada reinicio.
-
-    Más adelante, en un servidor con ffmpeg y disco, esta función puede
-    bajar el archivo, dejar una copia H.264 720p yuv420p con +faststart y
-    un poster, subir esa copia y devolver {"file_id", "mime", "ext", "size"}.
-    El original tiene que seguir en Drive.
-
-        ffmpeg -y -i entrada.mov -vf "scale=-2:720" -c:v libx264 \\
-            -preset veryfast -crf 23 -pix_fmt yuv420p -c:a aac -b:a 128k \\
-            -movflags +faststart salida.mp4
-        ffmpeg -y -i salida.mp4 -ss 1 -frames:v 1 poster.jpg
-    """
-    return None
+def convert_token():
+    """El token compartido con el worker. Sin token, no se convierte nada."""
+    token = os.environ.get(CONVERT_TOKEN_ENV, "").strip()
+    return token if len(token) >= 32 else ""
 
 
 def parse_size(value):
@@ -273,7 +275,40 @@ def clean_guest_text(value, limit):
     return text[:limit]
 
 
+def _clean_screen(value):
+    """Estado de la copia para la pantalla. Lo que no cierra se descarta."""
+    if not isinstance(value, dict) or value.get("state") not in SCREEN_STATES:
+        return None
+    state = value["state"]
+    clean = {"state": state}
+    if state == "ready":
+        size = value.get("size")
+        if (not isinstance(value.get("file_id"), str) or not value["file_id"]
+                or isinstance(size, bool) or not isinstance(size, int)
+                or size < 1 or size > MAX_BYTES):
+            return None
+        clean.update(file_id=value["file_id"], size=size, mime=CONVERT_MIME)
+    return clean
+
+
+def screen_state(row):
+    screen = row.get("screen")
+    return screen["state"] if screen else "original"
+
+
+def _waiting_for_copy(row, now=None):
+    if screen_state(row) != "pending":
+        return False
+    now = time.time() if now is None else now
+    return now - float(row["ts"]) < PENDING_FALLBACK_SECONDS
+
+
 def _present(row):
+    screen = _clean_screen(row.get("screen"))
+    if screen:
+        row["screen"] = screen
+    else:
+        row.pop("screen", None)
     row["nombre"] = clean_guest_text(row.get("nombre"), NAME_LIMIT)
     row["saludo"] = clean_guest_text(row.get("saludo"), GREETING_LIMIT)
     row["seen"] = row.get("seen") is True
@@ -281,29 +316,43 @@ def _present(row):
 
 
 def public_video(row):
+    # /loop lee esta lista: playable=False lo deja afuera mientras se prepara la
+    # copia H.264, y mime es el del archivo que /videos/<uid> va a entregar.
     return {
         "uid": row["uid"],
         "ext": row["ext"],
-        "mime": row["mime"],
+        "mime": screen_file(row)[2],
         "size": row["size"],
         "duration": row["duration"],
         "ts": row["ts"],
-        "playable": row["playable"],
+        "playable": row["playable"] and not _waiting_for_copy(row),
         "nombre": row.get("nombre") or "",
         "saludo": row.get("saludo") or "",
         "seen": row.get("seen") is True,
+        "pantalla": screen_state(row),
     }
+
+
+def screen_file(row):
+    """Lo que reproduce la pantalla: la copia H.264 si está, si no el original."""
+    screen = row.get("screen")
+    if screen and screen["state"] == "ready":
+        return screen["file_id"], screen["size"], screen["mime"]
+    return row["file_id"], row["size"], row["mime"]
 
 
 def loop_items():
     photos = list(deps.photo_items())
     videos = []
+    now = time.time()
     for row in visible_videos():
+        if _waiting_for_copy(row, now):
+            continue
         videos.append({
             "kind": "video",
             "src": f"/videos/{row['uid']}",
             "uid": row["uid"],
-            "mime": row["mime"],
+            "mime": screen_file(row)[2],
             "duration": row["duration"],
             "ts": row["ts"],
         })
@@ -390,20 +439,51 @@ def declares_hevc(read_at, size):
     return False
 
 
-def _reject_hevc_file(file_id, size):
+H264_TAGS = (b"avc1", b"avc3")
+HEVC_TAGS = (b"hvc1", b"hev1")
+
+
+def needs_screen_copy(read_at, size, ext):
+    """True si el MP4/MOV no es H.264 (HEVC del iPhone, ProRes, etc.).
+
+    WebM queda como está: VP8/VP9 los reproduce cualquier Chromium.
+    Si no se encuentra el moov, no se puede saber: se publica el original.
+    """
+    if ext == "webm" or not isinstance(size, int) or size < 8:
+        return False
+    offset = 0
+    for _guard in range(10000):
+        if offset + 8 > size:
+            return False
+        header = _read_box(read_at, offset, min(16, size - offset))
+        parsed = _box_header(header, size - offset)
+        if not parsed:
+            return False
+        kind, box_size, _header_len = parsed
+        if kind == b"moov":
+            chunk = _read_box(read_at, offset, min(box_size, 2 * 1024 * 1024))
+            if any(tag in chunk for tag in HEVC_TAGS):
+                return True
+            return not any(tag in chunk for tag in H264_TAGS)
+        offset += box_size
+        if offset >= size:
+            return False
+    return False
+
+
+def _detect_needs_copy(file_id, size, ext):
     def read_at(start, length):
         if start < 0 or start >= size or length <= 0:
             return b""
         end = min(size - 1, start + length - 1)
         return deps.read_range(file_id, start, end)
 
-    if not declares_hevc(read_at, size):
-        return
     try:
-        deps.drive().files().delete(fileId=file_id).execute()
+        return needs_screen_copy(read_at, size, ext)
     except Exception:
+        # Si Drive falla acá, el video entra como antes (original en /loop).
         traceback.print_exc()
-    raise ScreenFormatError(SCREEN_FORMAT_MESSAGE)
+        return False
 
 
 def create_session(ext, size, duration):
@@ -487,14 +567,94 @@ def register_upload(uid, size, duration, nombre="", saludo=""):
             "saludo": clean_guest_text(saludo, GREETING_LIMIT),
             "seen": False,
         }
-        # None = publicar el original. Una copia transcodificada se rechaza hasta
-        # que un VPS enseñe a esta función a guardarla sin borrar el original.
-        if transcode_for_screen(row, deps.drive()) is not None:
-            raise RuntimeError("Este servidor no publica videos transcodificados.")
+        if convert_token() and _detect_needs_copy(stored["id"], size, ext):
+            # Deja creada la carpeta de copias; el worker solo la busca.
+            if deps.convert_folder():
+                row["screen"] = {"state": "pending"}
         rows.append(row)
         save_rows(rows)
-        print(f"[video] registrado uid={uid} bytes={size}")
+        print(f"[video] registrado uid={uid} bytes={size} pantalla={screen_state(row)}")
         return row
+
+
+def _drive_delete(file_id):
+    try:
+        deps.drive().files().delete(fileId=file_id).execute()
+    except Exception:
+        traceback.print_exc()
+
+
+def accept_screen_copy(uid, file_id, size):
+    """El worker subió la copia H.264. Se valida en Drive antes de publicarla.
+
+    Devuelve "ready", o "gone" si el video ya no existe o se moderó (en ese
+    caso la copia se borra para que no quede suelta).
+    """
+    if not re.fullmatch(r"[0-9a-f]{32}", uid or ""):
+        raise ValueError("video")
+    if not isinstance(file_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{10,200}", file_id):
+        raise ValueError("copia")
+    if isinstance(size, bool) or not isinstance(size, int) or size < 1 or size > MAX_BYTES:
+        raise ValueError("copia")
+    folder = deps.convert_folder()
+    if not folder:
+        raise RuntimeError("No hay carpeta de copias.")
+    stored = deps.drive().files().get(
+        fileId=file_id, fields="id,name,size,mimeType,parents,trashed").execute()
+    if (stored.get("name") != f"{uid}.mp4" or folder not in (stored.get("parents") or [])
+            or stored.get("mimeType") != CONVERT_MIME or stored.get("trashed")):
+        raise ValueError("copia")
+    try:
+        stored_size = int(stored.get("size") or 0)
+    except (TypeError, ValueError):
+        stored_size = 0
+    if stored_size != size:
+        raise ValueError("copia")
+    with _lock:
+        rows = load_rows()
+        current = next((row for row in rows if row["uid"] == uid), None)
+        if not current or uid in deps.vetoes():
+            _drive_delete(file_id)
+            return "gone"
+        screen = current.get("screen") or {}
+        if screen.get("state") == "ready" and screen.get("file_id") == file_id:
+            return "ready"
+        if screen.get("state") == "ready":
+            old = screen.get("file_id")
+        else:
+            old = None
+        current["screen"] = {"state": "ready", "file_id": file_id, "size": size, "mime": CONVERT_MIME}
+        save_rows(rows)
+    if old and old != file_id:
+        _drive_delete(old)
+    print(f"[video] copia pantalla lista uid={uid} bytes={size}")
+    return "ready"
+
+
+def reject_screen_copy(uid):
+    """El worker no pudo convertir. /loop vuelve al original."""
+    if not re.fullmatch(r"[0-9a-f]{32}", uid or ""):
+        raise ValueError("video")
+    with _lock:
+        rows = load_rows()
+        current = next((row for row in rows if row["uid"] == uid), None)
+        if not current:
+            return "gone"
+        if screen_state(current) != "pending":
+            return screen_state(current)
+        current["screen"] = {"state": "failed"}
+        save_rows(rows)
+    print(f"[video] copia pantalla falló uid={uid}; queda el original")
+    return "failed"
+
+
+def _worker_allowed():
+    token = convert_token()
+    if not token:
+        return None
+    header = request.headers.get("Authorization", "")
+    supplied = header[7:].strip() if header.startswith("Bearer ") else ""
+    return bool(supplied) and hmac.compare_digest(supplied.encode(), token.encode())
 
 
 def _marker(uid):
@@ -514,10 +674,18 @@ def delete_video(uid):
         ids = set()
         if current and current.get("file_id"):
             ids.add(current["file_id"])
+        if current and current.get("screen", {}).get("file_id"):
+            ids.add(current["screen"]["file_id"])
         folder = deps.video_folder()
         if folder:
             for ext in EXTS:
                 for stored in _find_named(folder, f"{uid}.{ext}"):
+                    if stored.get("id"):
+                        ids.add(stored["id"])
+        if convert_token():
+            copies = deps.convert_folder()
+            if copies:
+                for stored in _find_named(copies, f"{uid}.mp4"):
                     if stored.get("id"):
                         ids.add(stored["id"])
         _marker(uid)
@@ -682,7 +850,9 @@ def register_screen_videos(app, injected):
             abort(503)
         if not row:
             abort(404)
-        size = row["size"]
+        download = request.args.get("descarga") == "1"
+        # La descarga del moderador es siempre el original.
+        file_id, size, mime = (row["file_id"], row["size"], row["mime"]) if download else screen_file(row)
         try:
             start, end, partial = parse_range(request.headers.get("Range"), size)
         except ValueError:
@@ -695,16 +865,55 @@ def register_screen_videos(app, injected):
         }
         if partial:
             headers["Content-Range"] = f"bytes {start}-{end}/{size}"
-        if request.args.get("descarga") == "1":
+        if download:
             headers["Content-Disposition"] = f'attachment; filename="{row["name"]}"'
         if request.method == "HEAD":
-            return Response(status=206 if partial else 200, mimetype=row["mime"], headers=headers)
+            return Response(status=206 if partial else 200, mimetype=mime, headers=headers)
 
         def generate():
             try:
-                yield from iter_chunks(deps.read_range, row["file_id"], start, end)
+                yield from iter_chunks(deps.read_range, file_id, start, end)
             except Exception:
                 traceback.print_exc()
                 return
 
-        return Response(generate(), status=206 if partial else 200, mimetype=row["mime"], headers=headers)
+        return Response(generate(), status=206 if partial else 200, mimetype=mime, headers=headers)
+
+    @app.route("/api/convert/<uid>/listo", methods=["POST"])
+    def convert_done(uid):
+        allowed = _worker_allowed()
+        if allowed is None:
+            abort(404)
+        if not allowed:
+            return jsonify(ok=False), 403
+        if request.content_length and request.content_length > 4096:
+            return jsonify(ok=False), 413
+        payload = request.get_json(silent=True) or {}
+        try:
+            state = accept_screen_copy(uid, payload.get("file_id"), payload.get("size"))
+        except ValueError:
+            return jsonify(ok=False), 400
+        except Exception:
+            traceback.print_exc()
+            return jsonify(ok=False), 503
+        if state == "gone":
+            return jsonify(ok=False, state=state), 410
+        return jsonify(ok=True, state=state)
+
+    @app.route("/api/convert/<uid>/fallo", methods=["POST"])
+    def convert_failed(uid):
+        allowed = _worker_allowed()
+        if allowed is None:
+            abort(404)
+        if not allowed:
+            return jsonify(ok=False), 403
+        try:
+            state = reject_screen_copy(uid)
+        except ValueError:
+            return jsonify(ok=False), 400
+        except Exception:
+            traceback.print_exc()
+            return jsonify(ok=False), 503
+        if state == "gone":
+            return jsonify(ok=False, state=state), 410
+        return jsonify(ok=True, state=state)
